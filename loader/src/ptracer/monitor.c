@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <dirent.h>
+#include <elf.h>
 #include <fcntl.h>
 #include <string.h>
 #include <time.h>
@@ -12,6 +13,7 @@
 #include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/signalfd.h>
+#include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -1080,8 +1082,82 @@ bool sigchld_listener_init() {
          The maps are read once per ambiguous exec, not per application: only an
          exec of app_process64 reaches the scan, and an application is forked,
          not exec'd. */
+/* INFO: The file behind a target's executable, and whether it is one this
+         monitor could inject.
+
+         A process is recognised as the spawner by its name before anything is
+         known about the bytes, and a name is the one thing anybody can copy: a
+         binary of the same name that does not host the runtime would be
+         injected, and injecting a process that does not host it is the failure
+         that once left every application unable to start. Twenty bytes of the
+         file the kernel says this process runs answers the question the
+         injector answers from the other side, by reading the mapping itself.
+
+         Only the class and the machine are asked, not the file type: the
+         spawner's own linkage is not ours to assume, and an executable that is
+         not ET_DYN still hosts the runtime. This monitor injects the bitness it
+         was built for - arm64, the only one it is built for - so a file of
+         another width or machine is not a target however it is named.
+
+         A file that cannot be read at all is not a refusal. The name is kept as
+         the answer then, because the one case where reading fails and the name
+         is still true is a binary that has been replaced under a running
+         process, and that process is the spawner it always was. */
+static bool monitor_target_elf_matches(const char *program) {
+  int fd = open(program, O_RDONLY | O_CLOEXEC);
+  if (fd == -1) return true;
+
+  struct stat st;
+  if (fstat(fd, &st) == -1) {
+    close(fd);
+
+    return true;
+  }
+
+  if (!S_ISREG(st.st_mode)) {
+    close(fd);
+
+    return false;
+  }
+
+  unsigned char header[20];
+  size_t filled = 0;
+
+  while (filled < sizeof(header)) {
+    ssize_t got = read(fd, header + filled, sizeof(header) - filled);
+    if (got == -1) {
+      if (errno == EINTR) continue;
+
+      break;
+    }
+
+    if (got == 0) break;
+
+    filled += (size_t)got;
+  }
+
+  close(fd);
+
+  /* INFO: A short read says the file is not what it claims to be, which is a
+            refusal rather than an unreadable one: the header is twenty bytes
+            and every ELF has them. */
+  if (filled < sizeof(header)) return false;
+  if (memcmp(header, ELFMAG, SELFMAG) != 0) return false;
+  if (header[EI_CLASS] != ELFCLASS64) return false;
+
+  uint16_t machine = 0;
+  memcpy(&machine, header + 18, sizeof(machine));
+
+  return machine == EM_AARCH64;
+}
+
 bool monitor_program_is_spawner(pid_t pid, const char *program) {
-  if (zn_spawner_map_is_spawner(program)) return true;
+  /* INFO: The name says which process this could be, and the file behind it
+            says whether it really is one this monitor can inject. Both answers
+            are needed: the name alone is a string anybody can put on a binary,
+            and the file alone is read once per candidate rather than once per
+            fork. */
+  if (zn_spawner_map_is_spawner(program)) return monitor_target_elf_matches(program);
 
   /* INFO: Only a runtime host is ambiguous: anything else that is not the
             spawner by name is not the spawner. */
