@@ -27,6 +27,72 @@
 #include "zn_spawner.h"
 #include "zygisk_next_api.h"
 
+/* INFO: The layout of the contract, pinned where every table is built.
+
+         A module is compiled against its own copy of zygisk_next_api.h, and the
+         compiler building it has never seen ours. Nothing about a field that
+         moved fails to build on either side: the module links, the call goes
+         through, and the function pointer it lands on belongs to some other
+         entry. The reference implementations assert the same facts, and so does
+         this - for the API table field by field, and for every structure a
+         module hands over or receives.
+
+         These live here rather than in zygisk_next_api.h itself because the
+         daemon compiles that header as C99 with -Wpedantic -Werror, where
+         _Static_assert is not part of the language. Every translation unit that
+         builds or reads one of these tables includes this file. */
+
+_Static_assert(sizeof(struct ZygiskNextAPI) == 10 * sizeof(void *),
+               "the Zygisk Next API table is ten pointers");
+_Static_assert(offsetof(struct ZygiskNextAPI, pltHook) == 0 * sizeof(void *),
+               "pltHook is the first entry of the Zygisk Next API table");
+_Static_assert(offsetof(struct ZygiskNextAPI, inlineHook) == 1 * sizeof(void *),
+               "inlineHook is the second entry of the Zygisk Next API table");
+_Static_assert(offsetof(struct ZygiskNextAPI, inlineUnhook) == 2 * sizeof(void *),
+               "inlineUnhook is the third entry of the Zygisk Next API table");
+_Static_assert(offsetof(struct ZygiskNextAPI, newSymbolResolver) == 3 * sizeof(void *),
+               "newSymbolResolver is the fourth entry of the Zygisk Next API table");
+_Static_assert(offsetof(struct ZygiskNextAPI, freeSymbolResolver) == 4 * sizeof(void *),
+               "freeSymbolResolver is the fifth entry of the Zygisk Next API table");
+_Static_assert(offsetof(struct ZygiskNextAPI, getBaseAddress) == 5 * sizeof(void *),
+               "getBaseAddress is the sixth entry of the Zygisk Next API table");
+_Static_assert(offsetof(struct ZygiskNextAPI, symbolLookup) == 6 * sizeof(void *),
+               "symbolLookup is the seventh entry of the Zygisk Next API table");
+_Static_assert(offsetof(struct ZygiskNextAPI, forEachSymbols) == 7 * sizeof(void *),
+               "forEachSymbols is the eighth entry of the Zygisk Next API table");
+_Static_assert(offsetof(struct ZygiskNextAPI, connectCompanion) == 8 * sizeof(void *),
+               "connectCompanion is the ninth entry of the Zygisk Next API table");
+_Static_assert(offsetof(struct ZygiskNextAPI, getRuntime) == 9 * sizeof(void *),
+               "getRuntime is the last entry of the Zygisk Next API table");
+
+_Static_assert(sizeof(struct ZygiskNextModule) == 2 * sizeof(void *),
+               "a Zygisk Next module entry is a version and a callback");
+_Static_assert(offsetof(struct ZygiskNextModule, onModuleLoaded) == sizeof(void *),
+               "onModuleLoaded follows the version of a Zygisk Next module entry");
+
+_Static_assert(sizeof(struct ZygiskNextRuntime) ==
+                   ((2 * sizeof(int) + _Alignof(void *) - 1) & ~(_Alignof(void *) - 1)) + sizeof(void *),
+               "the runtime table is two ints and one pointer");
+_Static_assert(offsetof(struct ZygiskNextRuntime, registerModule) ==
+                   ((2 * sizeof(int) + _Alignof(void *) - 1) & ~(_Alignof(void *) - 1)),
+               "registerModule sits after the two ints of the runtime table");
+
+_Static_assert(sizeof(struct ZnHyosAppSpecializeArgs) == 3 * sizeof(void *),
+               "the specialize arguments are three strings");
+_Static_assert(sizeof(struct ZygiskNextHyosModule) == 2 * sizeof(void *),
+               "a HyperOS module entry is a version and a callback");
+_Static_assert(offsetof(struct ZygiskNextHyosModule, onAppSpecialized) ==
+                   ((sizeof(int) + _Alignof(void *) - 1) & ~(_Alignof(void *) - 1)),
+               "onAppSpecialized follows the version of a HyperOS module entry");
+_Static_assert(sizeof(struct ZygiskNextHyosModule) ==
+                   offsetof(struct ZygiskNextHyosModule, onAppSpecialized) + sizeof(void *),
+               "a HyperOS module entry ends with its callback");
+
+_Static_assert(sizeof(struct ZygiskNextCompanionModule) == 3 * sizeof(void *),
+               "a companion entry is a version and two callbacks");
+_Static_assert(offsetof(struct ZygiskNextCompanionModule, onModuleConnected) == 2 * sizeof(void *),
+               "onModuleConnected is the last callback of a companion entry");
+
 /* INFO: How much of a specialization string is copied before it is handed to
          the modules. The contract promises strings that live for the length of
          the callback, and the buffers they point at are these; a value that

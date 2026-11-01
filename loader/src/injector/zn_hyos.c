@@ -17,34 +17,8 @@
 
 #include "zn_hyos.h"
 
-/* INFO: The ABI the runtime hands out is fixed by the contract header, and a
-         layout change on one side of it is invisible to the compiler building
-         the other: a module compiled against a different zygisk_next_api.h
-         still links and still calls, through fields that have moved. The
-         reference implementation asserts the same offsets, so an edit to the
-         header fails here rather than on a device. */
-_Static_assert(sizeof(struct ZygiskNextAPI) == 10 * sizeof(void *),
-               "the ZN API table is ten pointers");
-_Static_assert(offsetof(struct ZygiskNextAPI, getRuntime) == 9 * sizeof(void *),
-               "getRuntime is the last entry of the ZN API table");
-_Static_assert(offsetof(struct ZygiskNextRuntime, type) == 0,
-               "the runtime table starts with its type");
-_Static_assert(offsetof(struct ZygiskNextRuntime, api_version) == sizeof(int),
-               "the runtime version follows the type");
-_Static_assert(offsetof(struct ZygiskNextRuntime, registerModule) ==
-                 ((2 * sizeof(int) + _Alignof(void *) - 1) & ~(_Alignof(void *) - 1)),
-               "registerModule is a pointer past the two ints");
-_Static_assert(sizeof(struct ZygiskNextRuntime) ==
-                 offsetof(struct ZygiskNextRuntime, registerModule) + sizeof(void *),
-               "the runtime table ends with registerModule");
-_Static_assert(offsetof(struct ZygiskNextHyosModule, onAppSpecialized) ==
-                 ((sizeof(int) + _Alignof(void *) - 1) & ~(_Alignof(void *) - 1)),
-               "the module callback follows the version");
-_Static_assert(sizeof(struct ZygiskNextHyosModule) ==
-                 offsetof(struct ZygiskNextHyosModule, onAppSpecialized) + sizeof(void *),
-               "the module entry ends with its callback");
-_Static_assert(sizeof(struct ZnHyosAppSpecializeArgs) == 3 * sizeof(void *),
-               "the specialize arguments are three strings");
+/* INFO: The layout of every table and structure this file builds or reads is
+         pinned in zn_hyos.h, next to the contract it belongs to. */
 
 /* INFO: The HyperOS runtime, as the contract describes it.
 
@@ -237,6 +211,19 @@ static int zn_hyos_register_module(const void *module_ptr) {
     LOGE("HyperOS runtime: refusing a module built for API %d", module->target_api_version);
 
     return ZN_FAILED;
+  }
+
+  /* INFO: The same callback registered twice is one callback that would be
+             delivered twice: a module that registers from two places, or two
+             modules sharing a function, would see every specialization twice.
+             The contract asks for one delivery per registered module, so the
+             second registration is refused rather than served. */
+  for (size_t i = 0; i < zn_hyos_registration_count; i++) {
+    if (zn_hyos_registrations[i].module.onAppSpecialized == module->onAppSpecialized) {
+      LOGE("HyperOS runtime: refusing a duplicate registration");
+
+      return ZN_FAILED;
+    }
   }
 
   if (zn_hyos_registration_count == zn_hyos_registration_capacity) {

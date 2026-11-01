@@ -532,14 +532,8 @@ static int zn_connect_companion(void *handle) {
 /* INFO: The table is handed to a module compiled against this same header, so
          its layout is the contract rather than an implementation detail: a field
          that moved would hand a module the wrong function pointer without
-         anything failing to compile. The reference pins exactly these facts. */
-_Static_assert(sizeof(struct ZygiskNextAPI) == 10 * sizeof(void *),
-               "the Zygisk Next API table is ten pointers");
-_Static_assert(offsetof(struct ZygiskNextAPI, getRuntime) == 9 * sizeof(void *),
-               "getRuntime is the last entry of the Zygisk Next API table");
-_Static_assert(offsetof(struct ZygiskNextRuntime, registerModule) ==
-               ((2 * sizeof(int) + _Alignof(void *) - 1) & ~(_Alignof(void *) - 1)),
-               "registerModule sits after the two ints of the runtime table");
+         anything failing to compile. Every one of those facts is asserted in
+         zn_hyos.h, which is where the contract's layout is pinned. */
 
 /* INFO: The table every Zygisk Next module is served.
 
