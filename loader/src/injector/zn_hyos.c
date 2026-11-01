@@ -213,19 +213,6 @@ static int zn_hyos_register_module(const void *module_ptr) {
     return ZN_FAILED;
   }
 
-  /* INFO: The same callback registered twice is one callback that would be
-             delivered twice: a module that registers from two places, or two
-             modules sharing a function, would see every specialization twice.
-             The contract asks for one delivery per registered module, so the
-             second registration is refused rather than served. */
-  for (size_t i = 0; i < zn_hyos_registration_count; i++) {
-    if (zn_hyos_registrations[i].module.onAppSpecialized == module->onAppSpecialized) {
-      LOGE("HyperOS runtime: refusing a duplicate registration");
-
-      return ZN_FAILED;
-    }
-  }
-
   if (zn_hyos_registration_count == zn_hyos_registration_capacity) {
     size_t capacity = zn_hyos_registration_capacity == 0 ? 4 : zn_hyos_registration_capacity * 2;
 
