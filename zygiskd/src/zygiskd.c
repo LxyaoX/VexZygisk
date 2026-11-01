@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include <dirent.h>
+#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -915,12 +916,19 @@ static bool zn_library_in_module_dir(const char *module_dir, const char *lib_pat
          built for the other bitness can never work there. Shipping a 32- and a
          64-bit build and listing both is the common way modules are packaged,
          so this is a normal case and not a module's mistake: skipping it here
-         keeps a guaranteed-failing dlopen out of every target. */
+         keeps a guaranteed-failing dlopen out of every target.
+
+         Twenty bytes rather than five, because a class that matches says nothing
+         about the rest of the header: a shared object is ET_DYN, is
+         little-endian on every platform this runs on, and names the machine it
+         was assembled for. An ELF of the right width built for another
+         architecture is refused here, where the reason is known, instead of
+         failing inside the loader with nothing to say. */
 static bool zn_library_matches_abi(const char *path) {
   int fd = open(path, O_RDONLY | O_CLOEXEC);
   if (fd == -1) return false;
 
-  unsigned char header[5];
+  unsigned char header[20];
   size_t filled = 0;
 
   while (filled < sizeof(header)) {
@@ -939,12 +947,36 @@ static bool zn_library_matches_abi(const char *path) {
   close(fd);
 
   if (filled < sizeof(header)) return false;
-  if (header[0] != 0x7F || header[1] != 'E' || header[2] != 'L' || header[3] != 'F') return false;
+  if (memcmp(header, ELFMAG, SELFMAG) != 0) return false;
+  if (header[EI_DATA] != ELFDATA2LSB) return false;
 
 #if defined(__LP64__)
-  return header[4] == 2;  /* INFO: ELFCLASS64. */
+  if (header[EI_CLASS] != ELFCLASS64) return false;
 #else
-  return header[4] == 1;  /* INFO: ELFCLASS32. */
+  if (header[EI_CLASS] != ELFCLASS32) return false;
+#endif
+
+  uint16_t type = 0;
+  uint16_t machine = 0;
+
+  memcpy(&type, header + 16, sizeof(type));
+  memcpy(&machine, header + 18, sizeof(machine));
+
+  /* INFO: ET_DYN rather than either executable type: what is handed over is
+            loaded, not run, so the relocatable form is the only one that can
+            work. */
+  if (type != ET_DYN) return false;
+
+#if defined(__aarch64__)
+  return machine == EM_AARCH64;
+#elif defined(__arm__)
+  return machine == EM_ARM;
+#elif defined(__x86_64__)
+  return machine == EM_X86_64;
+#elif defined(__i386__)
+  return machine == EM_386;
+#else
+  return false;
 #endif
 }
 
@@ -1132,9 +1164,27 @@ static struct zn_cached_module *zn_parse_cache_get(const char *dir_name, const c
          would be. */
 #define ZN_PLAN_DEDUP_MAX 32
 
+/* INFO: The identity a library is deduplicated by: the file, not the name it
+         was reached through. Two names can be one file - a hard link, a second
+         module directory holding another link to the same library - and what
+         matters is that it is loaded once, because loading it twice installs
+         its hooks twice. The canonical path is the cheap answer and this is the
+         exact one; the stat is taken on the path that already matched, once per
+         matched row and not once per fork. */
+struct zn_served_library {
+  dev_t dev;
+  ino_t inode;
+};
+
 /* INFO: The listing of the module directory, rebuilt in place when the
          directory is gone from the table or its identity changed; otherwise it
          stays as it is. Kept across calls because it is read on every fork. */
+static int compare_zn_dir_entries(const void *left, const void *right) {
+  const struct zn_dir_entry *a = (const struct zn_dir_entry *)left;
+  const struct zn_dir_entry *b = (const struct zn_dir_entry *)right;
+
+  return strcmp(a->name, b->name);
+}
 static bool refresh_module_dir_cache(const struct stat *dir_st) {
   if (zn_dir_valid && stat_identity_same(dir_st, &zn_dir_st)) return true;
 
@@ -1173,6 +1223,16 @@ static bool refresh_module_dir_cache(const struct stat *dir_st) {
   }
 
   closedir(dir);
+
+  /* INFO: Sorted, so what a process is served does not depend on the order the
+             directory hands its entries back: two modules that both name the
+             same process are listed by name, the slots the loader indexes them
+             by are the same on every boot, and a report names the module it is
+             about whichever way the filesystem felt that day. */
+  if (zn_dir_cache_len > 1) {
+    qsort(zn_dir_cache, zn_dir_cache_len, sizeof(struct zn_dir_entry), compare_zn_dir_entries);
+  }
+
   zn_dir_st = *dir_st;
   zn_dir_valid = true;
 
@@ -1186,9 +1246,10 @@ static bool collect_zn_modules(const char *process_name, const char *process_pat
   size_t capacity = 0;
 
   /* INFO: Two modules may list the same library, and loading it twice would
-           install its hooks twice. The paths are canonical by the time they get
-           here (see zn_parse_cache_get), so a string compare decides it. */
-  const char *served[ZN_PLAN_DEDUP_MAX];
+           install its hooks twice. The identity is the file's rather than the
+           path's: a hard link keeps two names for one file, and the second one
+           is a library that must not be loaded a second time. */
+  struct zn_served_library served[ZN_PLAN_DEDUP_MAX];
   size_t served_len = 0;
 
   /* INFO: What "why did this process get nothing" needs, and the only place
@@ -1261,10 +1322,20 @@ static bool collect_zn_modules(const char *process_name, const char *process_pat
 
       rows_matched++;
 
+      /* INFO: Stated before anything is built for it, so a library that turns
+                out to be a duplicate costs one stat rather than a copy of
+                itself. */
+      struct stat library_st;
+      if (stat(line->lib_path, &library_st) == -1) {
+        LOGE("Failed stating the Zygisk Next library \"%s\"", line->lib_path);
+
+        continue;
+      }
+
       bool already_served = false;
 
       for (size_t seen = 0; seen < served_len; seen++) {
-        if (strcmp(served[seen], line->lib_path) == 0) {
+        if (served[seen].dev == library_st.st_dev && served[seen].inode == library_st.st_ino) {
           already_served = true;
 
           break;
@@ -1324,7 +1395,11 @@ static bool collect_zn_modules(const char *process_name, const char *process_pat
       (*out)[*out_len].owned = !shared;
       (*out_len)++;
 
-      if (served_len < ZN_PLAN_DEDUP_MAX) served[served_len++] = lib_path_copy;
+      if (served_len < ZN_PLAN_DEDUP_MAX) {
+        served[served_len].dev = library_st.st_dev;
+        served[served_len].inode = library_st.st_ino;
+        served_len++;
+      }
     }
   }
 
