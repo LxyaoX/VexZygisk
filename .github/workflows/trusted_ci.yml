@@ -4,6 +4,13 @@ on:
   push:
     branches: [ main ]
 
+  # INFO: The same jobs, asked for by hand. A push is the normal way in, but
+  #       until now it was the only way in - so when GitHub does not schedule
+  #       the push event, or a run is worth repeating against the very same
+  #       tree without another commit on top of it, nothing could be done from
+  #       outside but push an empty one.
+  workflow_dispatch:
+
 jobs:
   test:
     name: Host unit tests
