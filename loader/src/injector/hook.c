@@ -1454,28 +1454,65 @@ static void capture_clean_namespace(struct zygisk_context *ctx) {
   update_mnt_ns(Clean, true);
 }
 
-/* INFO: Hides the mounts of a process the denylist covers. The WebView zygote
-         never gets the in-place revert: its namespace is the one every WebView
-         renderer inherits for the whole uptime of the process, and running
-         umount2 inside it detaches mounts its own mountinfo still names - an
-         overlay that covers provider or framework resources then leaves WebView
-         resolving paths that no longer exist, which surfaces as broken WebView
-         initialization and blank module WebUIs. It is switched into the
-         daemon's cached clean namespace instead, the same isolation every other
-         implementation applies, with no unmount running inside a live zygote
-         child.
+/* INFO: Whether the name is an app zygote's. Android builds one process per
+         package that declares zygotePreloadName, named "<package>_zygote", and
+         WebView has its own, "webview_zygote": a process of its own that later
+         forks its children through the zygote descriptor machinery instead of
+         through the specialization path. */
+static bool is_app_zygote_name(const char *process) {
+  static const char suffix[] = "_zygote";
+  const size_t suffix_len = sizeof(suffix) - 1;
+
+  if (process == NULL) return false;
+
+  const size_t len = strlen(process);
+  if (len <= suffix_len) return false;
+
+  return strcmp(process + len - suffix_len, suffix) == 0;
+}
+
+/* INFO: Hides the mounts of a process the denylist covers.
+
+         An app zygote never gets the in-place revert, for two separate reasons
+         and both of them fatal.
+
+         The mount tree: it is the namespace every renderer and sandboxed
+         process it later forks inherits for the whole uptime of the process,
+         and running umount2 inside it detaches mounts its own mountinfo still
+         names - an overlay that covers provider or framework resources then
+         leaves the process resolving paths that no longer exist, which surfaces
+         as broken WebView initialization and blank module WebUIs.
+
+         The file descriptors: the copy this function makes belongs to the
+         process alone, so the next unshare - the one zygote itself performs a
+         few statements further into the same fork, in MountEmulatedStorage -
+         leaves it with no member at all and the kernel tears it down,
+         detaching every mount in it. Descriptors opened in between die with
+         that tree: zygote points the zygote socket descriptors at /dev/null
+         after the pre-specialize hooks have run, and once the mount behind them
+         is detached their paths read back as "/null" rather than "/dev/null".
+         Nothing notices until the process forks on its own, where zygote
+         reopens every descriptor by path and refuses the ones its allowlist no
+         longer matches - which is the app zygote of every Chromium-based
+         browser aborting with "Not allowlisted (N): /null", and an app zygote
+         that died is a browser with no sandboxed process, which is a browser
+         with no network at all.
+
+         So both are switched into the daemon's cached clean namespace instead,
+         which never had the traces and is held by the daemon, so it outlives
+         the unshare the fork performs.
 
          The private copy comes first for everyone else: unmounting without it
          would strip the traces out of the namespace the zygote sits in and
          every later fork would inherit that. A refused revert, or the mode
          being off, hides the process the namespace way instead - works as
          well, at the cost of one shared namespace. */
-static void isolate_denylisted(struct zygisk_context *ctx, bool is_webview_zygote) {
+static void isolate_denylisted(struct zygisk_context *ctx, bool is_app_zygote) {
   FLAG_SET(ctx, DO_REVERT_UNMOUNT);
 
-  if (is_webview_zygote) {
+  if (is_app_zygote) {
     if (!update_mnt_ns(Clean, false)) {
-      LOGE("Failed to switch webview_zygote to the clean mount namespace");
+      LOGE("Failed to switch the app zygote to the clean mount namespace");
     }
 
     return;
@@ -1540,15 +1577,22 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
             late. Doing it first also lets modules touch denylisted processes
             without the change being reverted.
 
-            The WebView app-zygote is never on the denylist, but it forks its
-            sandboxed children outside the specialization path and hands them
-            its own mount namespace. Left alone it keeps the root mount view
-            while a regular isolated process gets the clean one, and two
-            isolated processes then present different mount content. */
+            WebView's app zygote is isolated even though the denylist never
+            names it: it forks its sandboxed children outside the
+            specialization path and hands them its own mount namespace, so left
+            alone it keeps the root mount view while an isolated process gets
+            the clean one, and two isolated processes then present different
+            mount content. An app zygote the denylist does name is isolated for
+            that same reason, and only then - one the denylist leaves alone
+            keeps the mounts its own application keeps.
+
+            Which of the two isolations an app zygote gets is decided lower
+            down, in isolate_denylisted. */
+  bool is_app_zygote = is_app_zygote_name(ctx->process);
   bool is_webview_zygote = ctx->process != NULL && strcmp(ctx->process, "webview_zygote") == 0;
   bool in_denylist = (ctx->info_flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST || is_webview_zygote;
 
-  if (in_denylist) isolate_denylisted(ctx, is_webview_zygote);
+  if (in_denylist) isolate_denylisted(ctx, is_app_zygote);
 
   /* INFO: Executed after setns to ensure a module can update the mounts of an
               application without worrying about it being overwritten by setns.
