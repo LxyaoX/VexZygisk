@@ -24,24 +24,17 @@
   #define ALIGN_UP(x, a) (((x) + ((a)-1)) & ~((a)-1))
 #endif
 
-/* INFO: Load the injector into the target with the target's own linker.
+/* INFO: Loads the injector with the target's own linker.
 
-           The previous path hand-mapped the library with CSOLoader, which
-           mapped the PT_LOAD segments, applied the relocations and jumped to
-           the entry — and nothing else. Two things a real linker does on top of
-           that were therefore never done:
+           The previous path hand-mapped the library with CSOLoader: the PT_LOAD
+           segments, the relocations, and a jump to the entry - and nothing else.
+           So DT_INIT_ARRAY was never walked and no constructor ran, and the
+           object never appeared in the linker's soinfo list, which is what
+           LSPosed probes when it reports "Zygisk Next API is unavailable" with
+           the library plainly loaded.
 
-             - DT_INIT_ARRAY was never walked, so a library's constructors
-               never ran.
-             - the object was never registered in the linker's soinfo list, so
-               dl_iterate_phdr/dladdr could not see it from inside the target.
-               That is what LSPosed probes when it reports "Zygisk Next API is
-               unavailable" even though the library is plainly loaded.
-
-           Letting the target's own linker do the load fixes both by
-           construction rather than by imitation: it walks DT_INIT_ARRAY itself
-           and publishes a soinfo, and it is why a bundled engine needs no
-           accommodation in the injection path at all. */
+           Letting the linker do it fixes both by construction: it walks
+           DT_INIT_ARRAY itself and publishes a soinfo. */
 /* INFO: The message dlopen left in the target, read back out of it. It is the
          only place the real reason (missing soname, bad ELF, denied namespace)
          shows up - this side sees a NULL and nothing else.
@@ -99,18 +92,14 @@ static bool find_injected_range(int pid, const char *lib_path,
     return false;
   }
 
-  /* INFO: The object is identified by dev+inode rather than by its path. A
-            path test is not a safe key here: a module that replaced its own
-            file leaves the old one mapped under a "(deleted)" suffix, and any
-            second mapping whose path merely contains the same basename would
-            be read as part of the injected block. dev+inode names the file
-            itself, and because anonymous mappings carry inode 0 they are
-            excluded for free.
+  /* The object is identified by dev+inode, not by path: a module that replaced
+     its own file leaves the old one mapped under a "(deleted)" suffix, and a
+     second mapping whose path merely shares the basename would be read as part
+     of the injected block. Anonymous mappings carry inode 0, so they are
+     excluded for free.
 
-            Only the first pass still looks at the path, and it anchors the
-            match at the start so a longer path with this one as a substring
-            cannot be mistaken for it. A trailing "(deleted)" does not affect
-            the match. */
+     The first pass still looks at the path, anchored at the start so a longer
+     path with this one as a substring cannot match. */
   uintptr_t base = 0;
   size_t size = 0;
   dev_t lib_dev = 0;

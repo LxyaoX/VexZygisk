@@ -16,18 +16,15 @@
 
 /* The library a base address belongs to.
 
-   The ZN API hands out a base address; the answer wanted here is the image's
-   own identity - the mapping at offset zero - so the owning mapping is looked
-   up in the process maps. A zero base names no library, which the reference
-   reads as this process's own executable.
+   The API hands out a base address; what is wanted here is the image's own
+   mapping at offset zero, so the owning mapping is looked up in the process
+   maps. A zero base names no library, which reads as this process's own
+   executable.
 
    The table is kept for an application and read fresh for a process the loader
-   was injected into, whose own modules are mapping and unmapping while they
-   load (zn_injected_target tells the two apart). Reading it costs a fork, and
-   an application pays it once per module that targets it. A kept table can be
-   behind: a miss drops it, so a library mapped after it was taken is found by
-   the next call, and the answer a stale table gives in the meantime is "not
-   mapped", which is the safe direction.
+   was injected into, whose modules are mapping and unmapping as they load
+   (zn_injected_target tells the two apart). A miss drops the kept table, so a
+   stale answer is only ever "not mapped", which is the safe direction.
 */
 static struct maps_info *zn_maps_cache = NULL;
 
@@ -389,24 +386,18 @@ static void zn_for_each_symbols(struct ZnSymbolResolver *resolver, bool (*callba
   free(seen);
 }
 
-/* INFO: The resolver the contract asks for, built the way the reference builds
-         one.
+/* The resolver the contract asks for.
 
-         The library has to be one this process has mapped, and the mapping is
-         what supplies both the load base and the path the image is read from: a
-         caller may name the library by soname, and the mapping is what that name
-         resolved to. A library that is not mapped has no load base to hand back
-         and no symbols to resolve, so the answer is a null resolver - which is
-         also the answer the reference gives.
+   The library has to be one this process has mapped: the mapping supplies both
+   the load base and the path the image is read from, since a caller may name it
+   by soname. A library that is not mapped has no base to hand back and no
+   symbols to resolve, so the answer is a null resolver.
 
-         A base address is tried first and the name second, in that order and
-         for the same reason the reference does it: when the caller already knows
-         where the library is, nothing about the name can change the answer, and
-         only a base that names nothing falls back to it.
+   A base address is tried first and the name second: when the caller already
+   knows where the library is, nothing about the name can change the answer.
 
-         Symbols are read here rather than on the first lookup, so a library
-         whose symbols cannot be read is refused while the caller can still see
-         why. */
+   Symbols are read here rather than on the first lookup, so a library whose
+   symbols cannot be read is refused while the caller can still see why. */
 static struct ZnSymbolResolver *zn_new_symbol_resolver(const char *path, void *base_addr) {
   char *lib_path = NULL;
   void *load_base = NULL;

@@ -502,20 +502,12 @@ static void free_zn_module_files(struct ZnModuleFile *files, size_t len) {
          "<name=|path=><target> [companion] <library>". The library is always
          the last token and "companion" may sit anywhere between the target and
          it, so only that range is scanned for the flag. */
-/* INFO: The line parser, forwarded to the Rust half (see vexcore.h).
+/* The line parser, forwarded to the Rust half (see vexcore.h).
 
-         What it accepts has not changed: `name=` or `path=` to say what the
-         target is, an optional `companion` anywhere between it and the library,
-         and the library last. Neither has the rule that makes a relative
-         library path relative to the module directory rather than to wherever
-         the daemon happens to be running.
-
-         What did: the C version allocated both strings, so the caller had two
-         failure paths that were about the allocator and not about the line. The
-         answers come back in this frame's buffers, and the two copies below are
-         the caller's own lifetime rather than the parser's - which is the same
-         pair of `strdup`s the function used to end with, minus the question of
-         what a half-parsed line means. */
+   It accepts `name=` or `path=` for the target, an optional `companion` between
+   it and the library, and the library last; a relative library path is relative
+   to the module directory. The answers come back in this frame's buffers, so the
+   only allocation left is the caller's own copy. */
 static bool parse_zn_line(const char *module_dir, const char *line, bool *is_name, char **target, bool *companion, char **lib_path) {
   char target_buf[PATH_MAX];
   char lib_buf[PATH_MAX];
@@ -872,18 +864,14 @@ static bool zn_library_in_module_dir(const char *module_dir, const char *lib_pat
   return true;
 }
 
-/* INFO: A Zygisk Next library is loaded by the target process itself, so one
-         built for the other bitness can never work there. Shipping a 32- and a
-         64-bit build and listing both is the common way modules are packaged,
-         so this is a normal case and not a module's mistake: skipping it here
-         keeps a guaranteed-failing dlopen out of every target.
+/* A Zygisk Next library is loaded by the target process itself, so one built for
+   the other bitness can never work there. Shipping both and listing both is how
+   modules are normally packaged, so skipping it here keeps a guaranteed-failing
+   dlopen out of every target.
 
-         Twenty bytes rather than five, because a class that matches says nothing
-         about the rest of the header: a shared object is ET_DYN, is
-         little-endian on every platform this runs on, and names the machine it
-         was assembled for. An ELF of the right width built for another
-         architecture is refused here, where the reason is known, instead of
-         failing inside the loader with nothing to say. */
+   Twenty header bytes rather than five: a matching class says nothing about the
+   rest, and an ELF of the right width built for another machine is refused here,
+   where the reason is known. */
 static bool zn_library_matches_abi(const char *path) {
   int fd = open(path, O_RDONLY | O_CLOEXEC);
   if (fd == -1) return false;
@@ -1440,21 +1428,14 @@ static void send_daemon_info(const struct Context *restrict context) {
            rather than growing the stack further. */
 #define RELOAD_SNAPSHOT_MAX 512
 
-/* INFO: Re-reads the modules directory without moving a live index.
+/* Re-reads the modules directory without moving a live index.
 
-         Zygotes and WebView hosts that already read the module list hold
-         indices into context->modules, and the RemoveModule tombstone exists
-         precisely to keep those stable. A rebuild-from-scratch threw that
-         away: after a zygote restart reordered the list, a companion or
-         module-dir request from a still-running process landed on whatever
-         module now sat at its index.
-
-         So the reload merges instead of replacing: slots for modules that
-         are gone are tombstoned where they sit, slots for modules that
-         stayed are refreshed in place (their library descriptor re-opened
-         from the new file), and modules that are new are appended. The
-         Zygisk Next list is rebuilt freely - it is keyed by name on both
-         sides of the protocol, never by position. */
+   A zygote that already read the list holds indices into context->modules, which
+   is what the RemoveModule tombstone exists for; a rebuild-from-scratch threw
+   that away. So the reload merges: gone modules are tombstoned where they sit,
+   kept ones are refreshed (their library descriptor re-opened), new ones
+   appended. The Zygisk Next list is rebuilt freely - it is keyed by name on both
+   sides. */
 static void reload_modules(struct Context *restrict context) {
   /* INFO: The directory is read into a snapshot first, so that "is this
             module still on disk" is answered against one instant of it. */

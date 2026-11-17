@@ -114,18 +114,13 @@ uint32_t rezygiskd_get_process_flags(uid_t uid, const char *const process) {
   int fd = rezygiskd_connect(1, REZYGISKD_RETRY_DELAY_US);
   if (fd == -1) return 0;
 
-  /* INFO: The action, the uid and the name leave in one writev instead of
-            three writes. This runs in a zygote child that is on its way to its
-            first frame, once per application launch, and the three are one
-            request: the daemon reads them back field by field, and a stream
-            socket carries no message boundaries, so how many calls the bytes
-            arrived in is not part of the protocol.
+  /* The action, the uid and the name leave in one writev instead of three
+     writes: this runs in a zygote child on its way to its first frame, once per
+     launch, and the daemon reads the same fields back - a stream socket carries
+     no message boundaries.
 
-            A short return is a failure and the connection is dropped, which is
-            what a failed write did before. The socket carries SO_SNDTIMEO, so
-            a short write here means the daemon stopped reading, and a request
-            against a daemon like that is worth less than the launch it would
-            delay. */
+     A short return drops the connection, as a failed write did. The socket
+     carries SO_SNDTIMEO, so it means the daemon stopped reading. */
   uint8_t action = (uint8_t)GetProcessFlags;
   uint32_t uid_value = (uint32_t)uid;
   /* INFO: The length rides the wire as uint32_t like every other length in

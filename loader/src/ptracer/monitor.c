@@ -306,18 +306,15 @@ bool rezygiskd_listener_init() {
          magnitude while still keeping a corrupted length from being trusted. */
 #define MONITOR_STRING_MAX (64u * 1024u)
 
-/* INFO: One datagram of the controller protocol, with a cursor.
+/* One datagram of the controller protocol, with a cursor.
 
-         The socket is a datagram socket, and one datagram is the only unit
-         it delivers whole - so one datagram is also the unit this side
-         parses. A record is never read across two wakeups of the loop, and a
-         datagram that arrives without its record's first byte can never be
-         mistaken for the middle of another.
+   A datagram is the only unit this socket delivers whole, so it is also the unit
+   parsed here: a record is never read across two wakeups, and one that arrives
+   without its first byte cannot be mistaken for another's middle.
 
-         The buffer is larger than the sender's builder on purpose: a datagram
-         bigger than the buffer would be silently truncated by the kernel, and
-         the slack keeps even a future larger record parseable as a refusal
-         rather than cut. */
+   The buffer is larger than the sender's builder: the kernel truncates a
+   datagram that does not fit, and the slack keeps a future larger record
+   parseable as a refusal rather than cut. */
 #define MONITOR_DGRAM_MAX (8u * 1024u)
 
 struct monitor_dgram {
@@ -783,21 +780,15 @@ static bool should_stop_inject() {
 /* INFO: When the current daemon was forked, on the monotonic clock. */
 static struct timespec daemon_forked_at = {};
 
-/* INFO: A daemon is reachable through its socket, not through its pid: one that
-         is still alive but whose socket file has been removed cannot be
-         connected to at all, and answering "already running" for it disables
-         every module while the process sits there looking healthy.
+/* A daemon is reachable through its socket, not its pid: one whose socket file
+   was removed cannot be connected to, and answering "already running" for it
+   disables every module while the process looks healthy. A soft reboot does
+   exactly that, since post-fs-data.sh clears the directory while the previous
+   session's daemon is still up.
 
-         That is not hypothetical. A soft reboot replays the boot stages, and
-         the module's post-fs-data.sh clears the directory holding these sockets
-         while a monitor and daemon from the previous session are still running.
-         The pid alone left that session permanently unreachable.
-
-         Only an outright missing file counts as "gone". Any other failure -
-         EACCES if the policy denies the check itself, ELOOP, a transient
-         ENOMEM - is answered as present on purpose, because reading it as
-         missing would kill a daemon that may be perfectly reachable, once per
-         process start, and the replacement would hit the same wall. */
+   Only an outright missing file counts as gone. Any other failure - EACCES from
+   the policy, ELOOP, a transient ENOMEM - answers "present": reading it as
+   missing would kill a reachable daemon once per process start. */
 static bool daemon_socket_present() {
   if (access(ZYGISK_CP_SOCKET, F_OK) == 0) return true;
 
@@ -1105,38 +1096,19 @@ pid_t monitor_parent_of(int pid) {
   return (pid_t)ppid;
 }
 
-/* INFO: A TRACEFORK monitor sees only the forks made after init was seized, so
-         anything already running when this monitor starts is invisible to that
-         path. That is the whole of a late-load session - KernelSU loaded from
-         an LKM once the boot stages have passed - and also the case for a
-         monitor that had to be restarted.
+/* A TRACEFORK monitor sees only the forks made after init was seized, so anything
+   already running when it starts is invisible to it: that is the whole of a
+   late-load session, and of a monitor that had to be restarted.
 
-         Taking those processes over in place does not work. Every injection
-         entry point waits on a step of the target's own start-up that a process
-         which finished starting minutes ago never takes again: the tracer on
-         the linker resolving app_process's __libc_init slot, the injected GOT
-         break on the call through that slot. A tracer handed such a process
-         ends up stepping a live target instead of injecting it, and every
-         Zygisk module stays dead.
+   Such a process cannot be taken over in place - every injection entry point
+   waits on a start-up step it took minutes ago - so it is respawned instead: init
+   forks a fresh one that the normal fork path catches, and a zygote restart also
+   replays the boot stages and re-forks system_server, which is the one-time
+   "soft restart" a late-load user otherwise triggers by hand.
 
-         The one event that does work is the fresh fork+exec the fork path
-         already handles, so a target that predates this monitor is respawned
-         rather than taken over. init owns the zygote as a service and forks it
-         itself, so killing it makes init start a fresh process that this
-         monitor catches exactly the way it catches one on a normal boot. The
-         zygote is the framework's parent, so its restart also replays the boot
-         stages and re-forks system_server - the one-time bootstrap a late-load
-         user otherwise triggers by hand with the root manager's "soft
-         restart", and what makes a framework that is already up agree to be
-         injected at all.
-
-         On a normal boot this finds nothing, because the monitor starts well
-         before init ever execs the target; the scan only ever matches in a
-         late-load session or after a monitor restart.
-
-         A target is identified by three things together - its executable, its
-         parent being init, and being the lowest-pid match - because none of
-         them is enough on its own. See the scan below. */
+   On a normal boot the scan finds nothing, because the monitor is up before init
+   execs the target. A target is identified by its executable, its parent being
+   init, and being the lowest-pid match; none of the three is enough alone. */
 static void respawn_stale_targets(void) {
   DIR *proc = opendir("/proc");
   if (proc == NULL) {
@@ -1146,21 +1118,13 @@ static void respawn_stale_targets(void) {
   }
 
   /* The whole directory is read before anything is killed, and the target is
-     then killed once - the lowest pid that matched.
-
-     It cannot be a kill-as-you-go scan: the executable alone does not identify
-     the target, since every app process is a fork of the zygote and reads back
-     as app_process64, and more than one init service uses that executable (a
-     WebView zygote among them). readdir returns entries in directory order, so
-     whichever came first would be the one killed - possibly a user app, while
-     the real zygote is left alone and injection silently never happens.
-     Restricting to init's children removes the app processes, and the lowest
-     pid picks the zygote, which is init's first Java process, over any later
-     on-demand service.
-
-     Killing once also cannot turn the respawn into a loop: a target init starts
-     while this scan is still reading /proc has a higher pid than the one being
-     killed. */
+     killed once - the lowest pid that matched. It cannot be a kill-as-you-go
+     scan: every app process reads back as app_process64, and more than one init
+     service uses that executable, so whichever entry came first would be the one
+     killed. Restricting to init's children removes the app processes, and the
+     lowest pid is the zygote rather than a later on-demand service. Killing once
+     also cannot loop, since a target init starts during the scan has a higher
+     pid. */
   pid_t stale_zygote = 0;
 
   struct dirent *entry;
@@ -1303,24 +1267,13 @@ static bool child_is_tracked(pid_t pid) {
   return false;
 }
 
-/* INFO: Takes over a child the monitor has not seen before, so that the exec
-         that follows is handled here rather than by whichever monitor owns the
-         process next.
+/* Takes over a child the monitor has not seen before, so the exec that follows
+   is handled here rather than by whichever monitor owns the process next.
 
-         The slot comes from the water mark when there is one, which is the
-         common case - a launch is a burst of forks followed by a burst of
-         exits - and the table grows in powers of two when there is not.
-         Growing by a single element made every process of every launch pay for
-         a realloc and a copy of the whole array, where the water mark keeps the
-         array at the high-water mark of one burst rather than of the session.
-
-         A child that cannot be recorded is detached and let run: it is stopped
-         and under this monitor's control, and the slot it would have gone into
-         is exactly what just failed to allocate - so nothing later in the loop
-         would pick it up, and continuing without it leaves it stopped for good.
-         Detaching loses track of one process, which the failed allocation has
-         already cost, but the process survives and the fork it was making
-         completes. */
+   The slot comes from the water mark when there is one - a launch is a burst of
+   forks and then a burst of exits - and the table doubles when there is not. A
+   child that cannot be recorded is detached and let run: it is stopped and under
+   this monitor's control, so leaving it there would strand it. */
 static void track_child(pid_t pid, int wstatus) {
   size_t slot = sigchld_process_count;
 
@@ -1387,22 +1340,16 @@ static void tracked_slot_release(pid_t pid) {
   }
 }
 
-/* INFO: One hand-off in progress.
+/* One hand-off in progress.
 
-         The hand-off used to be a single blocking function: it asked the
-         target for a SIGSTOP and then sat in waitpid until the stop arrived -
-         inside the monitor's one and only event loop, where every daemon
-         command, every other child's stop and the status timer queued behind
-         it. A target that never reported its stop stalled the whole monitor
-         for as long as that wait and the retry sleeps around it took.
+   It is two halves: the first runs where the exec was seen and asks for the
+   stop, the second runs when the SIGCHLD drain delivers it and launches the
+   tracer. Between the two the event loop is free, which is why it is not the
+   single blocking waitpid this used to be.
 
-         It is two halves: the first runs where the exec was seen and asks for
-         the stop, the second runs when the SIGCHLD drain delivers the stop and
-         launches the tracer. Between the two, the loop is free.
-
-         The entry keeps the child's tracked slot alive - the drain routes by
-         that table, and the stop that completes the hand-off is one of the
-         child's own events. */
+   The entry keeps the child's tracked slot alive: the drain routes by that
+   table, and the stop that completes the hand-off is one of the child's own
+   events. */
 struct pending_handover {
   /* Zero means the slot is free; pids are never 0. */
   pid_t pid;

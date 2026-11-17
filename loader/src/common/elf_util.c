@@ -1050,15 +1050,11 @@ static bool _load_symtabs(ElfImg *img) {
 
 /* INFO: The GNU hash lookup, forwarded to the Rust half (see vexcore.h).
 
-         What stays here is the part that needs to know what an ElfImg is: which
-         fields hold the tables and which of them have to be present before any
-         of it is worth reading. The guard also gains the check on `strtab` that
-         the loop this replaces was missing - it dereferenced that pointer for
-         the string table's size without ever having checked it.
+         What stays here needs to know what an ElfImg is: which fields hold the
+         tables, and which must be present before any of them is worth reading.
 
          The tables are handed over rather than the image, so a change to this
-         structure cannot quietly change the meaning of a call: it has to be
-         made here, where the arguments are named. */
+         structure has to be made where the arguments are named. */
 ElfW(Addr) GnuLookup(ElfImg *restrict img, const char *name, uint32_t hash, unsigned char *sym_type) {
   if (img->gnu_nbucket_ == 0 || img->gnu_bloom_size_ == 0 || img->gnu_bloom_filter_ == NULL ||
       img->gnu_bucket_ == NULL || img->gnu_chain_ == NULL || img->dynsym_start == NULL ||
@@ -1206,17 +1202,10 @@ static ElfW(Addr) getSymbOffset(ElfImg *img, const char *name, unsigned char *sy
   typedef int (*__riscv_hwprobe_t)(struct riscv_hwprobe *__pairs, size_t __pair_count, size_t __cpu_count, unsigned long *__cpus, unsigned __flags);
 #endif
 
-/* INFO: GNU ifuncs (indirect functions) are functions that does not execute the code by itself,
-           but instead lead to other functions that may very according to hardware capabilities,
-           or other reasons, depending of the architecture.
-
-         This function is based on AOSP's (Android Open Source Project) code, and resolves the
-           indirect symbol, leading to the correct, most appropriate for the hardware, symbol.
-
-    SOURCES:
-     - https://android.googlesource.com/platform/bionic/+/refs/tags/android-16.0.0_r1/linker/linker.cpp#2594
-     - https://android.googlesource.com/platform/bionic/+/tags/android-16.0.0_r1/libc/bionic/bionic_call_ifunc_resolver.cpp#41
-*/
+/* INFO: An ifunc (indirect function) does not execute the code itself: it leads
+         to another function chosen for the hardware, so resolving one means
+         calling its resolver. Based on AOSP's bionic, which does the same for
+         the linker. */
 static ElfW(Addr) handle_indirect_symbol(ElfImg *img, ElfW(Off) offset) {
   ElfW(Addr) resolver_addr = (ElfW(Addr))((uintptr_t)img->base + offset - img->bias);
 

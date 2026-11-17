@@ -471,17 +471,11 @@ DCL_HOOK_FUNC(char *, strdup, const char *str) {
 
 static void hook_unloader(void);
 /*
-  INFO: Our goal is to get called after libart.so is loaded, but before ART actually starts running.
-          If we are too early, we won't find libart.so in maps, and if we are too late, we could make other
-          threads crash if they try to use the PLT while we are in the process of hooking it.
-          For this task, hooking property_get was chosen as there are lots of calls to this, so it's
-          relatively unlikely to break.
+  We want to be called after libart.so is loaded but before ART runs: too early
+  and it is not in the maps yet, too late and a thread using the PLT while it is
+  being hooked can crash. property_get is the trigger because it is called often.
 
-        After we succeed in getting called at a point where libart.so is already loaded, we will ignore
-          the rest of the property_get calls.
-  SOURCES:
-   - https://github.com/aosp-mirror/platform_frameworks_base/blob/1cdfff555f4a21f71ccc978290e2e212e2f8b168/core/jni/AndroidRuntime.cpp#L1266
-   - https://github.com/aosp-mirror/platform_frameworks_base/blob/1cdfff555f4a21f71ccc978290e2e212e2f8b168/core/jni/AndroidRuntime.cpp#L791
+  Once that point has been reached, the remaining calls are ignored.
 */
 DCL_HOOK_FUNC(int, property_get, const char *key, char *value, const char *default_value) {
   hook_unloader();
@@ -784,19 +778,14 @@ static void free_plt_hook_list(void) {
   plt_hook_list_count = 0;
 }
 
-/* INFO: The mapping table the hook registrations of one batch share.
+/* The mapping table one batch of hook registrations shares.
 
-         A module registers its hooks one after another and then commits, and
-         each registration used to read the maps afresh - a fork every time,
-         because the read has to stay invisible. Nothing changes between two
-         registrations of the same batch: the library being hooked is already
-         mapped, which is the only reason a register call can name it at all.
+   A module registers its hooks in a row and then commits; each registration used
+   to read the maps afresh, which is a fork every time because the read has to
+   stay invisible. Nothing changes between two registrations of one batch.
 
-         The commits are deliberately not served from here. api_plt_hook_commit
-         walks a table of its own, because a library mapped between the last
-         register and the commit has to be visible there; both of them drop
-         this one instead, so the next batch starts from the process as it is
-         then. */
+   The commit is not served from here: it walks a table of its own, so a library
+   mapped between the last register and the commit is visible. */
 static struct maps_info *plt_hook_maps_cache = NULL;
 
 static struct maps_info *plt_hook_take_maps(bool refresh) {
@@ -1493,19 +1482,15 @@ static void isolate_denylisted(struct zygisk_context *ctx, bool is_app_zygote) {
   }
 }
 
-/* INFO: The Zygisk Next plan for the process being specialized.
+/* The Zygisk Next plan for the process being specialized.
 
-         Modules are resolved per process: the zygote only ever loaded the ones
-         targeting it, so an entry that names an application would stay dead
-         otherwise. Every path that specializes a process asks here, always after
-         the fd sanitizer - so the memfd and the companion sockets the load opens
-         are not treated as leaked fds and closed - and after the mount namespace
-         switch, so the daemon's handover is not lost to setns. Libraries
-         inherited from the zygote are skipped inside the loader.
+   Modules are resolved per process, since the zygote only loaded the ones
+   targeting it. Asked after the fd sanitizer, so the memfds and companion
+   sockets the load opens are not closed as leaked, and after the namespace
+   switch, so the daemon's handover is not lost to setns.
 
-         Whether any Zygisk Next module exists is a daemon-wide fact, so the
-         first flags answer is remembered and every later fork skips the round
-         trip when there is nothing to resolve. */
+   Whether any Zygisk Next module exists is a daemon-wide fact: the first flags
+   answer is remembered and later forks skip the round trip. */
 static void zn_load_plan_for_specializing(const char *process_name) {
   if (zn_presence_known && !zn_modules_present) return;
 
@@ -1540,24 +1525,16 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
     setenv("ZYGISK_ENABLED", "1", 1);
   }
 
-  /* INFO: The mounts are updated before the modules run. In preSpecialize a
-            module still has the privileges to mount/umount/setns, and updating
-            the namespace afterwards would discard what it set up; by
-            postSpecialize the namespace is already switched, so it is too
-            late. Doing it first also lets modules touch denylisted processes
-            without the change being reverted.
+  /* The mounts are updated before the modules run: in preSpecialize a module
+     still has the privileges to mount/umount/setns, and doing it afterwards
+     would discard what it set up.
 
-            WebView's app zygote is isolated even though the denylist never
-            names it: it forks its sandboxed children outside the
-            specialization path and hands them its own mount namespace, so left
-            alone it keeps the root mount view while an isolated process gets
-            the clean one, and two isolated processes then present different
-            mount content. An app zygote the denylist does name is isolated for
-            that same reason, and only then - one the denylist leaves alone
-            keeps the mounts its own application keeps.
-
-            Which of the two isolations an app zygote gets is decided lower
-            down, in isolate_denylisted. */
+     WebView's app zygote is isolated even though the denylist never names it -
+     it forks its sandboxed children outside the specialization path and hands
+     them its own namespace, so left alone it keeps the root view while an
+     isolated process gets the clean one. An app zygote the denylist does name is
+     isolated for the same reason. Which isolation it gets is decided in
+     isolate_denylisted. */
   bool is_app_zygote = zygote_process_is_app_zygote(ctx->process);
   bool is_webview_zygote = ctx->process != NULL && strcmp(ctx->process, "webview_zygote") == 0;
   bool in_denylist = (ctx->info_flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST || is_webview_zygote;
@@ -1875,21 +1852,16 @@ void hook_functions(void) {
 }
 
 static void hook_unloader(void) {
-  /* INFO: Run the expensive setup (PLT unregister + module load) at most once,
-           but keep retrying until every piece of it has taken: the first
-           property_get calls can land before the runtime is loaded, in which
-           case plti_add_lib fails and a later call tries again.
+  /* Runs the expensive setup (PLT unregister + module load) at most once, but
+     retries until every piece of it has taken: the first property_get calls can
+     land before the runtime is loaded, so plti_add_lib fails and a later call
+     tries again. A module load that failed against a busy daemon used to be
+     final, which read from outside as "Zygisk randomly does not work today";
+     load_modules_only answers false only before it has loaded anything, so a
+     retry starts clean.
 
-           The module load retries on the same trigger. A load that fails
-           against a busy daemon during a boot burst used to be final, and
-           classic modules then never loaded in this zygote or in any process
-           it forked, for the whole boot - which read, from the outside, as
-           "Zygisk randomly does not work today". load_modules_only answers
-           false only before it has loaded anything, so a retry starts clean.
-
-           The in-progress flag keeps the retries single-threaded: a module
-           that calls property_get while it is loading would otherwise re-
-           enter this setup around itself. */
+     The in-progress flag keeps the retries single-threaded: a module calling
+     property_get while loading would otherwise re-enter this setup. */
   static bool installed = false;
   static bool in_progress = false;
   static bool libart_added = false;

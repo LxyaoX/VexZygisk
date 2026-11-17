@@ -2,21 +2,15 @@
 /*
  * The module card: what this monitor's state reads as on the manager's screen.
  *
- * The monitor's own file is about tracing - which process to seize, when to
- * hand it to a tracer, when a stop is justified. This is about the sentence a
- * user reads afterwards: the run line, the module list, the Zygisk Next
- * diagnosis, and the two files it goes into (module.prop's description and
- * state.json), which are the only places a release build still says anything.
+ * The monitor's own file is about tracing; this is about the sentence a user
+ * reads afterwards - the run line, the module list, the Zygisk Next diagnosis -
+ * and the two files it goes into (module.prop's description and state.json),
+ * which are the only places a release build still says anything.
  *
- * They share nothing but the state they describe, and keeping both in one file
- * meant every change to either one was a change to a file already long enough
- * that neither was easy to follow.
- *
- * Everything here is drawn once per update from the struct monitor_status_view
- * the monitor fills in where it hands the state over. Nothing caches a copy of
- * that state: a second copy of "is the daemon running" is exactly the kind of
- * answer that ends up disagreeing with the process it describes, which is the
- * bug this card has already had once.
+ * Everything here is drawn from the struct monitor_status_view the monitor fills
+ * in where it hands the state over. Nothing caches a copy: a second copy of "is
+ * the daemon running" is exactly the answer that ends up disagreeing with the
+ * process it describes.
  */
 
 #include <limits.h>
@@ -486,21 +480,15 @@ bool monitor_status_update(const struct monitor_status_view *view, const char *m
   return true;
 }
 
-/* INFO: A description a previous monitor wrote carries its status run in
-         front of the pristine text, and the capture below takes the whole tail
-         verbatim - so without this, every later write prints that old run
-         again under the new one. That is not cosmetic: a card whose last write
-         happened while the monitor was stopped kept saying "stopped" for the
-         rest of the boot, next to a fresh run that said it was running, and a
-         reader had no way to tell which of the two described the process in
-         front of them. It is also the only way a stale run ever outlives the
-         session that wrote it, since the boot-stage reset only restores the
-         file between boots.
+/* A description a previous monitor wrote carries its status run in front of the
+   pristine text, and the capture takes the whole tail verbatim - so without this
+   every later write prints that old run again under the new one. A card whose
+   last write happened while the monitor was stopped then kept saying "stopped"
+   for the rest of the boot, next to a fresh run that said it was running.
 
-         One run is "[<status>] <Modules: ... · >", and nothing else is ever
-         written in front of the description, so the cut is anchored at the
-         start. The loop is for a file that already accumulated runs: each pass
-         removes the frontmost one. */
+   One run is "[<status>] <Modules: ... · >" and nothing else precedes the
+   description, so the cut is anchored at the start; the loop removes one
+   frontmost run per pass for a file that accumulated several. */
 static void strip_written_status(char *tail) {
   for (int pass = 0; pass < 8; pass++) {
     if (tail[0] != '[') return;
