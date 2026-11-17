@@ -124,27 +124,6 @@ cc -std=c18 -D_GNU_SOURCE -Wall -Wextra -Werror \
    tests/host/test_hiding.c -o /tmp/test_hiding
 /tmp/test_hiding
 
-# INFO: What identifies the HyperOS spawner. The name and the image header are
-#       both text and bytes, and both decide which branch the loader takes in
-#       the spawner - the branch that installs the JNI hooks is the wrong one,
-#       and it is the one that crashed every application it was taken in.
-cc -std=c18 -D_GNU_SOURCE -Wall -Wextra -Werror \
-   -Itests/host -Iloader/src/include \
-   tests/host/test_zn_spawner.c -o /tmp/test_zn_spawner
-/tmp/test_zn_spawner
-
-# INFO: The HyperOS runtime's own decisions: whether a process is taken for the
-#       runtime, which modules may register and while the window is open, what
-#       the hooks are asked for and what is left behind when they cannot be
-#       placed, and whether a specialization reaches a module once. The maps and
-#       the hooking engine are stubbed - everything around them is the shipped
-#       code, and none of it can be re-derived from a device that answers "no
-#       runtime" after the fact.
-cc -std=c18 -D_GNU_SOURCE -Wall -Wextra -Werror \
-   -Itests/host -Iloader/src/include \
-   tests/host/test_zn_hyos.c -o /tmp/test_zn_hyos
-/tmp/test_zn_hyos
-
 cc -std=c18 -D_GNU_SOURCE -Wall -Wextra -Werror \
    -Itests/host -Iloader/src/include -Izygiskd/src -Izygiskd/src/root_impl \
    tests/host/test_apatch.c -o /tmp/test_apatch

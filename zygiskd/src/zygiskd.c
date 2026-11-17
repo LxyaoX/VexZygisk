@@ -18,7 +18,6 @@
 #include <unistd.h>
 
 #include "constants.h"
-#include "zn_control_protocol.h"
 #include "zn_status.h"
 #include "zygisk_paths.h"
 #include "zn_targets.h"
@@ -62,27 +61,6 @@ struct Context {
   struct ZnCompanion *zn_companions;
   size_t zn_companions_len;
 
-  /* INFO: The HyperOS runtime's control sessions, one descriptor per forked
-           application that still holds one. They are sessions and not requests:
-           the connection is accepted, answered once, and then kept open for as
-           long as the process behind it reports - which is why they are watched
-           rather than served.
-
-           Nothing is accumulated per report: what a session carries is the
-           runtime's own record of what it did, and the daemon's side of it is
-           the log line each record produces. A fork with no Zygisk Next status
-           surface to answer has no table to keep, and one that nobody reads
-           would only go stale. */
-  int *zn_sessions;
-  size_t zn_sessions_len;
-
-  /* INFO: The list grows by doubling and never shrinks, like the poll set
-           that reads it: on a HyperOS device a session is opened for every
-           application the spawner forks, so the entry count climbs for as long
-           as the daemon runs, and growing it one entry at a time copied the
-           whole list on each of those. The peak is what it has to be sized
-           for. */
-  size_t zn_sessions_capacity;
 };
 
 /* INFO: A Zygisk Next library resolved for one target: its path, whether the
@@ -570,29 +548,18 @@ static bool parse_zn_line(const char *module_dir, const char *line, bool *is_nam
   return true;
 }
 
-/* INFO: Whether one manifest line selects this process.
-
-         A name target is answered by the executable's own name, with the
-         zygote-class spelling resolved the way zn_targets.h explains.
-
-         A path target names the executable, which is what /proc/self/exe
-         answers - except on the builds where the HyperOS runtime is hosted by
-         an ART binary and the image the manifest means is mapped into it rather
-         than exec'd. The runtime scan knows that image's path, so the loader
-         hands it over as a second answer, and a target that spells it selects
-         this process whichever file it exec'd. An empty second answer is "there
-         is no second answer", which is every process that does not host the
-         runtime. */
-static bool zn_matches_target(const char *target, bool is_name, const char *process_name, const char *process_path, const char *image_path) {
+/* Whether one manifest line selects this process. A name target is answered by
+   the executable's own name, with the zygote-class spelling resolved the way
+   zn_targets.h explains; a path target names the executable, which is what
+   /proc/self/exe answers. */
+static bool zn_matches_target(const char *target, bool is_name, const char *process_name, const char *process_path) {
   if (is_name) {
     if (zn_target_is_zygote_class(target)) return zn_process_is_zygote_class(process_name);
 
     return strcmp(process_name, target) == 0;
   }
 
-  if (strcmp(process_path, target) == 0) return true;
-
-  return image_path != NULL && image_path[0] != '\0' && strcmp(image_path, target) == 0;
+  return strcmp(process_path, target) == 0;
 }
 
 /* INFO: Every exchange the daemon takes part in is bound by this, client
@@ -604,13 +571,6 @@ static bool zn_matches_target(const char *target, bool is_name, const char *proc
            daemon.c): serving a client for longer than that only delays every
            fork queued behind it, for a caller that has already given up. */
 #define DAEMON_EXCHANGE_TIMEOUT_SECS 3
-
-/* INFO: The one exception: a HyperOS control session sits quiet between the
-           reports of the applications that inherited it, so it gets a
-           generous deadline instead of the exchange budget - generous, and
-           not infinite, because half a record written by any of those
-           applications must not block the daemon's poll loop forever. */
-#define ZN_SESSION_READ_TIMEOUT_SECS 30
 
 /* Forks a process that runs "zygiskd <mode> <fd>" and hands it the child end
    of a socket pair, so the companion keeps the daemon's SELinux domain.
@@ -1239,7 +1199,7 @@ static bool refresh_module_dir_cache(const struct stat *dir_st) {
   return true;
 }
 
-static bool collect_zn_modules(const char *process_name, const char *process_path, const char *image_path, struct ZnModuleFile **out, size_t *out_len) {
+static bool collect_zn_modules(const char *process_name, const char *process_path, struct ZnModuleFile **out, size_t *out_len) {
   *out = NULL;
   *out_len = 0;
 
@@ -1314,7 +1274,7 @@ static bool collect_zn_modules(const char *process_name, const char *process_pat
 
       rows_examined++;
 
-      if (!zn_matches_target(line->target, line->is_name, process_name, process_path, image_path)) {
+      if (!zn_matches_target(line->target, line->is_name, process_name, process_path)) {
         if (example_target == NULL) example_target = line->target;
 
         continue;
@@ -1417,7 +1377,7 @@ static bool collect_zn_modules(const char *process_name, const char *process_pat
 
   /* INFO: Written for the same reason the line above is logged, and for the
             case the log cannot reach: a release build has no log at all. */
-  if ((image_path != NULL && image_path[0] != '\0') || zn_process_is_zygote_class(process_name)) {
+  if (zn_process_is_zygote_class(process_name)) {
     zn_status_record(process_name, dirs_walked, lists_valid, rows_examined, rows_matched, example_target);
   }
 
@@ -1941,32 +1901,10 @@ static void handle_read_zn_modules(struct Client *client) {
     return;
   }
 
-  /* INFO: The path of the HyperOS runtime image, from the process that hosts
-            one. Empty for everything else, including an application the spawner
-            forked: it inherits the runtime state, and inheriting it is not the
-            same as being the spawner.
-
-            An empty string is a valid answer here and not a failure, which is
-            why this one test is `ret < 0` where the name and the path above use
-            `ret <= 0`: read_string answers 0 for a string of length zero, and
-            refusing that would hang up on every request from a process that is
-            not the runtime host - which is all of them, the zygote and the apps
-            included. The plan would come back empty everywhere and no Zygisk
-            Next module would load anywhere, with nothing in any log to say
-            why. The name and the path cannot legitimately be empty, so refusing
-            those stays the right answer. */
-  char image_path[PATH_MAX] = { 0 };
-  ret = read_string(client->fd, image_path, sizeof(image_path));
-  if (ret < 0) {
-    LOGE("Failed reading the runtime image path for ReadZnModules.");
-
-    return;
-  }
-
   struct ZnModuleFile *files = NULL;
   size_t files_len = 0;
 
-  if (!collect_zn_modules(process_name, process_path, image_path, &files, &files_len)) {
+  if (!collect_zn_modules(process_name, process_path, &files, &files_len)) {
     ret = write_size_t(client->fd, 0);
     ASSURE_SIZE_WRITE("ReadZnModules", "len", ret, sizeof(uint32_t), return);
 
@@ -2189,85 +2127,6 @@ static void handle_remove_module(struct Client *client) {
   ASSURE_SIZE_WRITE("RemoveModule", "response", ret, sizeof(uint8_t), return);
 }
 
-/* INFO: Takes an accepted connection over as a HyperOS runtime control session.
-
-         This is the one action that answers without giving the connection back.
-         The runtime reports over it later, from processes that cannot open one
-         of their own by then - an application is specialized, and the daemon's
-         socket is not its to connect to - so the descriptor is kept here and the
-         process that asked for it is expected to fork with it open. What the
-         loop below watches, therefore, is not a request that is still running
-         but a session that has not ended.
-
-         The caller is not checked against anything: a session grants nothing
-         but the ability to say that a module was told about a specialization,
-         and every process that can reach this socket already runs as root. */
-static void handle_open_zn_control_session(struct Client *client) {
-  struct Context *context = client->context;
-
-  if (context->zn_sessions_len == context->zn_sessions_capacity) {
-    const size_t capacity = context->zn_sessions_capacity == 0
-                              ? (size_t)8
-                              : context->zn_sessions_capacity * 2;
-
-    int *grown = realloc(context->zn_sessions, capacity * sizeof(int));
-    if (grown == NULL) {
-      /* INFO: Nothing is confirmed and the connection is left to be closed: a
-                session the loop is not watching is worse than no session, because
-                the process that asked for it would keep writing records nobody
-                reads until one of them no longer fit the socket. */
-      LOGE("Failed growing the Zygisk Next control session list.");
-
-      return;
-    }
-
-    context->zn_sessions = grown;
-    context->zn_sessions_capacity = capacity;
-  }
-
-  context->zn_sessions[context->zn_sessions_len] = client->fd;
-  context->zn_sessions_len++;
-
-  /* INFO: A session is read while it is quiet and reports whenever the process
-            behind it specializes, which can be minutes later. The exchange
-            budget that bounds every request would end it at the first quiet
-            moment - but no deadline at all is worse than a generous one:
-            the descriptor is inherited by every application the spawner
-            forks, and any of them can write half a record and stop. A read
-            that can never time out then blocks the daemon's poll loop
-            forever, and every loader request behind it burns its own budget
-            against a daemon that stopped answering.
-
-            A real report is one sendmsg - the writer sends the record whole
-            or nothing - so the fields are already in the socket buffer when
-            poll wakes this side. Anything still split after this long is
-            not a report arriving slowly, and ending the session is the
-            right answer to it. */
-  struct timeval timeout = { .tv_sec = ZN_SESSION_READ_TIMEOUT_SECS, .tv_usec = 0 };
-  setsockopt(client->fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-  setsockopt(client->fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-
-  /* INFO: The loop closes every accepted connection it is not told to keep. */
-  client->keep_open = true;
-
-  /* INFO: Confirmed last, and only once there is a session to confirm: the
-            answer is what tells the caller this descriptor is worth keeping, and
-            one sent before the list held it would be a promise this side cannot
-            keep. A failure here is taken back out of the list and left to the
-            loop to close - one close for one descriptor. */
-  ssize_t ret = write_uint8_t(client->fd, 1);
-  if (ret != (ssize_t)sizeof(uint8_t)) {
-    LOGE("Failed confirming a Zygisk Next control session.");
-
-    context->zn_sessions_len--;
-    client->keep_open = false;
-
-    return;
-  }
-
-  LOGI("Opened a Zygisk Next control session (%zu open)", context->zn_sessions_len);
-}
-
 /* INFO: Ordered by action value; the table is small enough that a linear scan
          costs less than the socket round trip around it. */
 static const struct ActionHandler kActionHandlers[] = {
@@ -2281,14 +2140,8 @@ static const struct ActionHandler kActionHandlers[] = {
   { UpdateMountNamespace,   "UpdateMountNamespace",   handle_update_mount_namespace  },
   { RemoveModule,           "RemoveModule",           handle_remove_module           },
   { ReadZnModules,          "ReadZnModules",          handle_read_zn_modules         },
-  { SpawnZnCompanion,       "SpawnZnCompanion",       handle_spawn_zn_companion      },
-  { OpenZnControlSession,   "OpenZnControlSession",   handle_open_zn_control_session }
+  { SpawnZnCompanion,       "SpawnZnCompanion",       handle_spawn_zn_companion      }
 };
-
-/* INFO: ReportZnRuntime is deliberately not in the table. It is a record on an
-         already open session, not an action a client opens a connection to ask
-         for, and the only thing a listener could do with it is refuse it - which
-         is what an unregistered action gets. */
 
 static const struct ActionHandler *find_action_handler(enum DaemonSocketAction action) {
   for (size_t i = 0; i < sizeof(kActionHandlers) / sizeof(kActionHandlers[0]); i++) {
@@ -2298,68 +2151,6 @@ static const struct ActionHandler *find_action_handler(enum DaemonSocketAction a
   return NULL;
 }
 
-/* INFO: Reads one record from a control session. Everything the runtime reports
-         is a report: this is a channel one way, opened by the spawner and
-         written by the applications it forks, and none of them is waiting for
-         anything to come back.
-
-         Returns false when the session is over. Three readings mean that, and
-         they are deliberately one answer: the last process holding the session
-         exited (end of file), the record is not one this build knows, or it did
-         not arrive whole. A stream this build cannot parse is not one it can
-         stay in step with - the alternative is reading the next record at the
-         wrong offset and reporting whatever is found there. */
-static bool serve_zn_session(struct Context *restrict context, size_t index) {
-  const int fd = context->zn_sessions[index];
-
-  uint8_t action8 = 0;
-  ssize_t len = read_uint8_t(fd, &action8);
-  if (len <= 0) return false;
-
-  if (action8 != (uint8_t)ReportZnRuntime) {
-    LOGW("Unknown record %u on a Zygisk Next control session, ending it", (unsigned int)action8);
-
-    return false;
-  }
-
-  /* INFO: The record is read field for field, and the fields are the two that
-            zn_control_protocol.h declares - the one place that says what shape a
-            writer sends and a reader expects. Reading it as a structure would
-            work right up until one side's compiler laid it out differently.
-
-            The pid is the one the reporter sent rather than the peer credential
-            of this socket: the session was opened by the spawner, so the peer is
-            the spawner for every report its children make, and a line that named
-            it would name the wrong process. */
-  uint32_t pid = 0;
-  uint32_t id_len = 0;
-
-  if (read_uint32_t(fd, &pid) == -1) return false;
-  if (read_uint32_t(fd, &id_len) == -1) return false;
-
-  /* INFO: A report that names no process is not a report, and neither is one
-            whose length cannot be a module id - both mean this stream is no
-            longer where this build thinks it is, and the next record would be
-            read at the wrong offset. */
-  if (pid == 0 || id_len == 0 || id_len >= ZN_CONTROL_MODULE_ID_MAX) {
-    LOGW("Malformed record on a Zygisk Next control session (pid %u, id length %u), ending it", pid, id_len);
-
-    return false;
-  }
-
-  char module_id[ZN_CONTROL_MODULE_ID_MAX];
-  if (read_loop(fd, module_id, id_len) != (ssize_t)id_len) return false;
-
-  module_id[id_len] = '\0';
-
-  LOGI("HyperOS runtime: module \"%s\" was told about the specialization of pid %u", module_id, pid);
-
-  return true;
-}
-
-/* INFO: Serves one accepted connection: the action is read, dispatched, and the
-         connection closed again - unless the handler took it over, which only
-         the control session does. */
 static void serve_accepted(int client_fd, struct Context *restrict context, char *restrict argv[], bool *first_process) {
   /* INFO: Bound a single exchange so a stuck client cannot stall the zygote
             forks waiting behind it. A control session clears this for itself:
@@ -2411,86 +2202,22 @@ static void serve_accepted(int client_fd, struct Context *restrict context, char
 static void serve_loop(int socket_fd, struct Context *restrict context, char *restrict argv[]) {
   bool first_process = true;
 
-  /* INFO: The set is rebuilt on every wakeup - the listener first, then one
-            entry per live control session - but the array itself is kept: it
-            grows to the high-water mark of the session and is rewritten in
-            place after that. Allocating it per wakeup made this the daemon's
-            most frequent allocation, and its failure the one that ended the
-            loop - a daemon that returns leaves every session without one until
-            the next zygote start. Sessions come and go; the peak is what the
-            array has to be sized for. */
-  struct pollfd *polled = NULL;
-  size_t polled_capacity = 0;
+  struct pollfd polled = { .fd = socket_fd, .events = POLLIN, .revents = 0 };
 
   while (1) {
-    const size_t session_count = context->zn_sessions_len;
-    const size_t wanted = session_count + 1;
+    polled.revents = 0;
 
-    if (wanted > polled_capacity) {
-      size_t capacity = polled_capacity == 0 ? (size_t)16 : polled_capacity;
-
-      while (capacity < wanted) capacity *= 2;
-
-      struct pollfd *grown = realloc(polled, capacity * sizeof(struct pollfd));
-      if (grown == NULL) {
-        PLOGE("grow the poll set");
-
-        free(polled);
-
-        return;
-      }
-
-      polled = grown;
-      polled_capacity = capacity;
-    }
-
-    /* INFO: The listener and every control session are waited on together. A
-              spawner forks an application per launch and opens a session per
-              fork, so there can be many of them at once, and waiting on any one
-              of them alone would leave the listener unserved for as long as that
-              one is quiet - while the requests behind it are zygotes about to
-              specialize, where a wait is felt by the user. */
-    polled[0].fd = socket_fd;
-    polled[0].events = POLLIN;
-    polled[0].revents = 0;
-
-    for (size_t i = 0; i < session_count; i++) {
-      polled[i + 1].fd = context->zn_sessions[i];
-      polled[i + 1].events = POLLIN;
-      polled[i + 1].revents = 0;
-    }
-
-    const int ready = poll(polled, (nfds_t)wanted, -1);
+    const int ready = poll(&polled, 1, -1);
     if (ready == -1) {
       /* A signal (EINTR) only interrupts this one wait; keep serving. */
       if (errno == EINTR) continue;
 
       PLOGE("poll");
 
-      free(polled);
-
       return;
     }
 
-    const bool listener_ready = (polled[0].revents & POLLIN) != 0;
-
-    /* INFO: The sessions are read first and walked backwards, so that one
-              ending here cannot move the index of one that has not been read
-              yet: dropping the entry at i shifts everything after it left, and
-              those have already been served by then. */
-    for (size_t i = session_count; i > 0; i--) {
-      if (polled[i].revents == 0) continue;
-
-      if (serve_zn_session(context, i - 1)) continue;
-
-      close(context->zn_sessions[i - 1]);
-
-      memmove(&context->zn_sessions[i - 1], &context->zn_sessions[i],
-              (context->zn_sessions_len - i) * sizeof(int));
-      context->zn_sessions_len--;
-    }
-
-    if (!listener_ready) continue;
+    if ((polled.revents & POLLIN) == 0) continue;
 
     /* INFO: CLOEXEC on the accepted fd keeps client connections out of the
               companion processes forked while a handler runs. */
@@ -2516,32 +2243,11 @@ static void serve_loop(int socket_fd, struct Context *restrict context, char *re
 
       PLOGE("accept");
 
-      free(polled);
-
       return;
     }
 
     serve_accepted(client_fd, context, argv, &first_process);
   }
-}
-
-/* INFO: Ends every control session that is still open.
-
-         Only the end of the daemon does this. A session belongs to the process
-         that opened it and to the applications it was passed to; ending one
-         because the daemon was asked for something - a zygote restart is the one
-         request that reloads the module list - would take the runtime's
-         reporting away from applications that are still running. */
-static void free_zn_sessions(struct Context *restrict context) {
-  for (size_t i = 0; i < context->zn_sessions_len; i++) {
-    close(context->zn_sessions[i]);
-  }
-
-  free(context->zn_sessions);
-
-  context->zn_sessions = NULL;
-  context->zn_sessions_len = 0;
-  context->zn_sessions_capacity = 0;
 }
 
 void zygiskd_start(char *restrict argv[]) {
@@ -2574,7 +2280,6 @@ void zygiskd_start(char *restrict argv[]) {
   serve_loop(socket_fd, &context, argv);
 
   close(socket_fd);
-  free_zn_sessions(&context);
   free_modules(&context);
   root_impl_cleanup();
 }

@@ -47,21 +47,14 @@ struct monitor_status_view {
   bool supported;
   bool zygote_injected;
   bool daemon_running;
-
-  /* Whether this monitor has ever recognised the HyperOS spawner. */
-  bool spawner_seen;
 };
 
 void init_monitor();
 
 /* `exit_kill` says whether a tracer death may take the target with it
-   (PTRACE_O_EXITKILL): yes for a zygote the monitor restarts anyway, never for
-   the spawner every application comes from. */
+   (PTRACE_O_EXITKILL): yes for a zygote the monitor restarts anyway. */
 bool trace_zygote(int pid, bool exit_kill);
 
-/* The two questions the card's spawner scan asks: it has to ask what the exec
-   path asks - name and image together - or it answers something else. */
-bool monitor_program_is_spawner(pid_t pid, const char *program);
 pid_t monitor_parent_of(int pid);
 
 enum rezygiskd_command {

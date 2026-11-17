@@ -11,9 +11,8 @@
    every log line out, so the answer goes to a file and the monitor reads it back
    onto the card.
 
-   Only requests from a process that hosts the runtime are recorded: one the
-   zygote-class names resolve to, or the process that reported a runtime image. An
-   application asking for its own plan says nothing about whether the path works.
+   Only requests from a zygote-class process are recorded; an application asking
+   for its own plan says nothing about whether the path works.
 
    `example_target` is the first row that did not name this process, kept for the
    case where none did - it is what a reader compares against the reported name,

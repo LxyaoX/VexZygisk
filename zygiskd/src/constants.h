@@ -36,9 +36,7 @@ enum DaemonSocketAction {
   UpdateMountNamespace   = 7,
   RemoveModule           = 8,
   ReadZnModules          = 9,
-  SpawnZnCompanion       = 10,
-  OpenZnControlSession   = 11,
-  ReportZnRuntime        = 12
+  SpawnZnCompanion       = 10
 };
 
 /* Two states, not four: how the implementation was found is answered by whether

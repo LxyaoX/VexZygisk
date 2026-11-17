@@ -5,7 +5,6 @@
 #include <stdint.h>
 
 #include "zygisk_paths.h"
-#include "zn_control_protocol.h"
 
 #include <unistd.h>
 
@@ -13,11 +12,6 @@
    accepted at once or refused outright, so a longer wait only stalls every
    injection while the daemon is down, and this still rides out a restart. */
 #define REZYGISKD_RETRY_DELAY_US 100000
-
-/* The HyperOS spawner passes the long one: its daemon may have been forked in
-   the same breath as the spawner's exec, and its module plan is loaded once for
-   every app it will ever fork. */
-#define REZYGISKD_RETRY_DELAY_SPAWNER_US 1000000
 
 /* Must stay in step with enum DaemonSocketAction on the daemon. */
 enum rezygiskd_actions {
@@ -31,9 +25,7 @@ enum rezygiskd_actions {
   UpdateMountNamespace,
   RemoveModule,
   ReadZnModules,
-  SpawnZnCompanion,
-  OpenZnControlSession,
-  ReportZnRuntime
+  SpawnZnCompanion
 };
 
 struct zygisk_modules {
@@ -92,18 +84,9 @@ void free_modules(struct zygisk_modules *modules);
    daemon cannot be reached, which is the signal to read the modules directly.
    `retry` is the number of extra attempts, so the call makes retry + 1 and
    waits at most retry * retry_delay_us. */
-bool rezygiskd_read_zn_modules(const char *process_name, const char *process_path, const char *image_path, uint8_t retry, uint32_t retry_delay_us, struct zn_module_file **out, size_t *out_len);
+bool rezygiskd_read_zn_modules(const char *process_name, const char *process_path, uint8_t retry, uint32_t retry_delay_us, struct zn_module_file **out, size_t *out_len);
 
 void free_zn_module_files(struct zn_module_file *files, size_t len);
-
-/* Opens the session the HyperOS runtime reports over. The daemon keeps the
-   connection rather than answering and closing, and the descriptor is inherited
-   by the applications the spawner forks - they are the ones that report. */
-int rezygiskd_open_zn_control_session(void);
-
-/* Writes one module report: this module was told about a specialization. False
-   when the record could not be written, which no caller acts on. */
-bool rezygiskd_report_zn_runtime(int session_fd, const char *module_id);
 
 /* Has the daemon spawn a companion for this library; returns its control
    socket, or -1 when it is unavailable. */

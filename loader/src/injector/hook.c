@@ -171,13 +171,11 @@ size_t zygisk_module_length = 0;
 static bool zn_presence_known = false;
 static bool zn_modules_present = false;
 
-/* INFO: The specialize pipeline is a process-global sequence (g_ctx, the cached
-           fork pid). The classic zygote is single-threaded, which is what makes
-           that safe; HyperOS's hyos_spawner spawns in parallel, so two threads
-           could interleave and hand both parents the same cached child. A
-           semaphore serializes it, chosen over a mutex because the fork
-           duplicates it into the child and a semaphore has no owning thread to
-           strand the child's copy. */
+/* The specialize pipeline is a process-global sequence (g_ctx, the cached fork
+   pid), and nothing promises the caller is single-threaded: two threads could
+   interleave and hand both parents the same cached child. A semaphore
+   serializes it, chosen over a mutex because the fork duplicates it into the
+   child and a semaphore has no owning thread to strand the child's copy. */
 static sem_t spawn_pipeline_sem;
 static pthread_once_t spawn_pipeline_once = PTHREAD_ONCE_INIT;
 

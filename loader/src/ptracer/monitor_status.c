@@ -31,7 +31,6 @@
 
 #include "utils.h"
 #include "zygisk_paths.h"
-#include "zn_spawner.h"
 
 #include "monitor.h"
 #include "monitor_status.h"
@@ -162,177 +161,13 @@ static void json_escape_into(char *dst, size_t cap, const char *src) {
   dst[off] = '\0';
 }
 
-/* INFO: Whether a process is one of the executables the spawner hides behind.
-
-         Only the name is asked here, not the image behind it: this runs over
-         every process in /proc and the image check reads the maps. */
-static bool program_has_art_host_name(const char *program) {
-  const char *base = strrchr(program, '/');
-  base = base == NULL ? program : base + 1;
-
-  return strcmp(base, "app_process64") == 0 || strcmp(base, "artd") == 0;
-}
-
-/* INFO: A number, appended where a caller already holds the offset. It exists
-         because the bounded append above takes text, and formatting a number
-         into a temporary to hand it that text is how the buffers on this card
-         were made too small before. */
-static void append_bounded_number(char *buf, size_t cap, size_t *off, unsigned long value) {
-  char digits[16];
-  size_t at = sizeof(digits);
-  unsigned long magnitude = value;
-
-  if (magnitude == 0) {
-    at--;
-
-    digits[at] = '0';
-  }
-
-  while (magnitude != 0 && at > 0) {
-    at--;
-
-    digits[at] = (char)('0' + (int)(magnitude % 10));
-    magnitude /= 10;
-  }
-
-  while (at < sizeof(digits) && *off + 1 < cap) buf[(*off)++] = digits[at++];
-
-  buf[*off] = '\0';
-}
-
-/* INFO: The exec path of a pid, or false when it cannot be read.
-
-         The monitor reads the same path behind program_matches, which reports
-         the failure; the sweep below meets kernel threads, zombies and entries
-         that are not readable at all, and none of that is worth a line, which is
-         the only difference between the two. */
-static bool probe_program_path(int pid, char *buf, size_t size) {
-  return read_exe_path(pid, buf, size) > 0;
-}
-
-/* INFO: Why the spawner was never recognised, as far as this side can tell.
-
-         The monitor learns about a target from init: it seizes init, sees the
-         forks, and attaches each child to catch the exec that follows. That is
-         one level deep, and a child that turns out not to be a target is let
-         go - so whatever it forks afterwards is invisible.
-
-         "The spawner was never seen" therefore has two very different causes
-         needing different fixes. The process may not be running under a name
-         this monitor knows, or it may be running but out of reach. One pass
-         over /proc tells them apart, and it only runs while the answer is still
-         no.
-
-         The question asked of each candidate is the one the exec path asks -
-         monitor_program_is_spawner, name and image together - because anything weaker
-         would answer a different question. The name is tried first since it is
-         free; the image check reads that process's maps, so it is done for the
-         ART hosts only, and only for the first few of them: a booted system has
-         one app_process64 per running application.
-
-         The process count is reported as well, and that is not decoration: a
-         card written during the first moments of a boot is a card written
-         before most of the system exists, and the reader has to be able to tell
-         "there is no spawner" from "there was not much of anything yet". */
-#define SPAWNER_PROBE_IMAGE_CHECKS 8
-
-static void append_spawner_probe(char *out, size_t cap) {
-  DIR *proc = opendir("/proc");
-  if (proc == NULL) {
-    str_append_bounded(out, cap, " (proc unreadable)");
-
-    return;
-  }
-
-  pid_t spawner_pid = 0;
-  pid_t spawner_parent = 0;
-  size_t host_named = 0;
-  size_t scanned = 0;
-  size_t image_checks = 0;
-  bool by_image = false;
-
-  struct dirent *entry;
-  while ((entry = readdir(proc)) != NULL) {
-    if (entry->d_name[0] < '0' || entry->d_name[0] > '9') continue;
-
-    char *endptr = NULL;
-    const long pid_value = strtol(entry->d_name, &endptr, 10);
-    if (endptr == entry->d_name || *endptr != '\0' || pid_value <= 1) continue;
-
-    char program[PATH_MAX];
-    if (!probe_program_path((int)pid_value, program, sizeof(program))) continue;
-
-    scanned++;
-
-    if (zn_spawner_map_is_spawner(program)) {
-      spawner_pid = (pid_t)pid_value;
-      spawner_parent = monitor_parent_of((int)pid_value);
-
-      break;
-    }
-
-    if (!program_has_art_host_name(program)) continue;
-
-    host_named++;
-
-    if (image_checks >= SPAWNER_PROBE_IMAGE_CHECKS) continue;
-
-    image_checks++;
-
-    if (!monitor_program_is_spawner((pid_t)pid_value, program)) continue;
-
-    spawner_pid = (pid_t)pid_value;
-    spawner_parent = monitor_parent_of((int)pid_value);
-    by_image = true;
-
-    break;
-  }
-
-  closedir(proc);
-
-  str_append_bounded(out, cap, " (");
-
-  if (spawner_pid == 0) {
-    str_append_bounded(out, cap, "no process carries the spawner image, ");
-
-    size_t off = strlen(out);
-    append_bounded_number(out, cap, &off, (unsigned long)host_named);
-    str_append_bounded(out, cap, " app_process64/artd of ");
-    off = strlen(out);
-    append_bounded_number(out, cap, &off, (unsigned long)scanned);
-    str_append_bounded(out, cap, " process(es)");
-
-    return;
-  }
-
-  size_t off = strlen(out);
-  str_append_bounded(out, cap, "spawner is pid ");
-  off = strlen(out);
-  append_bounded_number(out, cap, &off, (unsigned long)spawner_pid);
-  if (by_image) str_append_bounded(out, cap, " (by image)");
-  str_append_bounded(out, cap, ", parent ");
-  off = strlen(out);
-  append_bounded_number(out, cap, &off, (unsigned long)spawner_parent);
-  str_append_bounded(out, cap, spawner_parent == 1 ? " (init - its exec was missed)"
-                                                  : " (not init - out of the traced tree)");
-}
-
 /* INFO: The Zygisk Next half of the status line.
 
-         Three different faults all look like "my Zygisk Next module does not
-         load": the spawner was never recognised, the daemon was never asked,
-         or a plan came back with nothing that named the process. Only the
-         first is visible from here; the other two are what the daemon writes
-         down, read back for the same line. A release build keeps no log of
-         any of it, and the card is where somebody actually looks. */
-static void append_zn_status_text(const struct monitor_status_view *view, char *out, size_t cap) {
-  if (view->spawner_seen) {
-    str_append_bounded(out, cap, ", ZN: spawner seen");
-  } else {
-    str_append_bounded(out, cap, ", ZN: spawner unseen");
-    append_spawner_probe(out, cap);
-  }
-
+         Two faults look alike from the outside - the daemon was never asked,
+         and a plan came back naming nothing - and only the daemon can tell
+         them apart. It writes down which, and that is read back here: a release
+         build keeps no log, and the card is where somebody looks. */
+static void append_zn_status_text(char *out, size_t cap) {
   int fd = 0;
 
   do {
@@ -354,8 +189,7 @@ static void append_zn_status_text(const struct monitor_status_view *view, char *
 
   close(fd);
 
-  /* INFO: An empty file and no file say the same thing: nobody has asked,
-            which is itself the answer when the spawner was never injected. */
+  /* An empty file and no file say the same thing: nobody has asked. */
   if (got <= 0) {
     str_append_bounded(out, cap, " (no plan asked)");
 
@@ -445,7 +279,7 @@ static void append_status_text(const struct monitor_status_view *view, char *out
       /* INFO: Both halves of the state, because either one alone has been
                 read as the whole story. The loader is in the zygote and every
                 process forked since carries it, but a monitor that is not
-                tracing injects nothing new: a zygote or spawner that restarts
+                tracing injects nothing new: a zygote that restarts
                 from here on gets nothing, and the boot ends with no injection
                 at all. A bare "✅ injected" next to the pause emoji is what
                 had people reporting a stopped monitor with a green line beside
@@ -467,7 +301,7 @@ static void append_status_text(const struct monitor_status_view *view, char *out
     }
   }
 
-  append_zn_status_text(view, out, cap);
+  append_zn_status_text(out, cap);
 
   /* INFO: Why the monitor is not tracing, once that is known. The state alone
             says what happened but not why, and the reason is what tells a stop

@@ -10,61 +10,25 @@
 #include "elf_util.h"
 #include "logging.h"
 #include "misc.h"
-#include "zn_ihook.h"
-#include "zn_lsplt.h"
 
 #include "zn_api.h"
-#include "zn_hyos.h"
 #include "zn_loader.h"
 
-/* INFO: The library a base address belongs to, as LSPlt identifies one.
+/* The library a base address belongs to.
 
-          The ZN API hands out a base address while LSPlt keys a library on its
-          file identity (device + inode), so the owning mapping is looked up in
-          the process maps and resolved to the mapping at offset zero.
+   The ZN API hands out a base address; the answer wanted here is the image's
+   own identity - the mapping at offset zero - so the owning mapping is looked
+   up in the process maps. A zero base names no library, which the reference
+   reads as this process's own executable.
 
-          A zero base names no library. The reference reads that as this
-          process's own executable - a module asking to hook its own PLT is
-          asking a sensible question - so that is the answer here too.
-
-          The path and the load base come back as well when the caller wants
-          them: the symbol resolver has to read the file a mapping names rather
-          than the name it was given, and the load base is where the image
-          starts with no bias folded in.
-
-          The scan is redone per call, which is what the reference does and what
-          keeps the answer honest: a cached identity goes stale the moment a
-          library is unloaded and another one is mapped where it was, and a
-          pltHook then lands on the wrong file. Nothing here is shared between
-          threads either, so no lock is needed. */
-/* INFO: This process's own mapping table.
-
-         Both Zygisk Next entries that need it take it from here, and it is read
-         fresh for each of them rather than kept: the table is what says whether
-         a library is mapped, and a table held from an earlier moment answers
-         about a library that has since been unloaded - which is a base address
-         into freed memory handed to a module. parse_maps_safe is what makes the
-         read safe at all: it hands the file over from a child, so a maps read
-         can never deadlock against this process's own allocator. */
-/* INFO: The mapping table kept for the Zygisk Next entries, and the rule for
-         when it is read again.
-
-         Reading the table costs a fork, and an application pays it once per
-         module that targets it: the plan for an application is loaded on every
-         fork, and each module's onModuleLoaded may resolve a library. So the
-         table is taken once per application and reused, which is what the
-         reference does too and for the same reason.
-
-         A process the loader was injected into is not cached. Its own modules
-         are being mapped into it while they load, so a table read a moment ago
-         is already behind; zn_injected_target is what tells the two apart.
-
-         The risk of a kept table is a library that has gone, answered as though
-         it were still there - a base address into freed memory handed to a
-         module. zn_forget_maps bounds it: a miss drops the table, so a library
-         mapped after it was taken is found by the next call, and the answer a
-         stale table gives in the meantime is "not mapped", which is the safe
-         direction to be wrong in. */
+   The table is kept for an application and read fresh for a process the loader
+   was injected into, whose own modules are mapping and unmapping while they
+   load (zn_injected_target tells the two apart). Reading it costs a fork, and
+   an application pays it once per module that targets it. A kept table can be
+   behind: a miss drops it, so a library mapped after it was taken is found by
+   the next call, and the answer a stale table gives in the meantime is "not
+   mapped", which is the safe direction.
+*/
 static struct maps_info *zn_maps_cache = NULL;
 
 static struct maps_info *zn_maps_for_lookup(void) {
@@ -113,7 +77,7 @@ static void zn_forget_maps(void) {
   zn_maps_cache = NULL;
 }
 
-static bool zn_map_for_base(uintptr_t base_addr, dev_t *dev, ino_t *inode, char **out_path, void **out_load_base) {
+static bool zn_map_for_base(uintptr_t base_addr, char **out_path, void **out_load_base) {
   bool found = false;
 
   /* INFO: Twice at most. A miss drops the kept table and asks again with a
@@ -177,14 +141,11 @@ static bool zn_map_for_base(uintptr_t base_addr, dev_t *dev, ino_t *inode, char 
         if (!inside) continue;
       }
 
-      /* INFO: Any address inside the library names it, but the identity LSPlt
-                wants is the image's own: the mapping at offset zero. A mapping
-                whose image is not in the table at all still answers, as itself -
-                which is what the scan this replaces did when it found nothing. */
+      /* Any address inside the library names it, but the answer is the
+         image's own mapping at offset zero; one whose image is not in the table
+         at all still answers, as itself. */
       const struct map_entry *image = head != NULL ? head : entry;
 
-      if (dev != NULL) *dev = image->dev;
-      if (inode != NULL) *inode = image->inode;
       if (out_load_base != NULL) *out_load_base = (void *)(image->start - image->offset);
 
       if (out_path != NULL) {
@@ -286,58 +247,34 @@ static char *zn_mapped_lib_path(const char *want) {
   return found;
 }
 
+/* The three hook entries are refused rather than served: this fork ships no PLT
+   or inline hooking engine, so a module that asks gets the answer the contract
+   has for "could not hook" instead of a hook that would never fire. */
 static int zn_plt_hook(void *base_addr, const char *symbol, void *hook_handler, void **original) {
-  if (symbol == NULL || hook_handler == NULL) return ZN_FAILED;
+  (void)base_addr;
+  (void)symbol;
+  (void)hook_handler;
+  (void)original;
 
-  dev_t dev = 0;
-  ino_t inode = 0;
-  if (!zn_map_for_base((uintptr_t)base_addr, &dev, &inode, NULL, NULL)) return ZN_FAILED;
+  LOGE("pltHook is not available in this build");
 
-  /* INFO: LSPlt implements the ZN unhook contract natively: registering the
-             backup of a previous call back as the handler restores the GOT
-             entries and cleans up.
-
-             `original` is handed straight through and may be NULL. A symbol the
-             image does not import is left untouched and the call still
-             succeeds - that is the answer the reference gives, and this fork
-             used to turn it into a failure, which a module could tell apart
-             from the same call made there. */
-  if (zn_lsplt_register_hook(dev, inode, symbol, hook_handler, original) != 0) {
-    LOGE("Failed registering the PLT hook for %s", symbol);
-
-    return ZN_FAILED;
-  }
-
-  /* INFO: An application the spawner forked inherits the map snapshot the
-             spawner's own commit took, so it commits against that snapshot
-             instead of reading /proc/self/maps again - which is the form the
-             reference picks on that side, and the reason the cached entry point
-             exists at all. */
-  const int committed = zn_hyos_in_child() ? zn_lsplt_commit_hook_cached() : zn_lsplt_commit_hook();
-  if (committed != 0) {
-    LOGE("Failed committing the PLT hook for %s", symbol);
-
-    return ZN_FAILED;
-  }
-
-  return ZN_SUCCESS;
+  return ZN_FAILED;
 }
 
-/* INFO: The inline hook entry, served by the engine the reference for this
-         contract uses (zn_ihook.h, injector/ihook_shim.cpp).
-
-         What used to be here - the table of hooked addresses, the window
-         comparison and the single-thread gate - went with the engine, because
-         all three are its rules rather than the contract's: the window is the
-         length of the patch it plants, and the gate is there because it
-         rewrites the instruction stream. A second copy of them on this side
-         would be a second answer to the same question. */
 static int zn_inline_hook(void *target, void *addr, void **original) {
-  return zn_ihook_install(target, addr, original) ? ZN_SUCCESS : ZN_FAILED;
+  (void)target;
+  (void)addr;
+  (void)original;
+
+  LOGE("inlineHook is not available in this build");
+
+  return ZN_FAILED;
 }
 
 static int zn_inline_unhook(void *target) {
-  return zn_ihook_uninstall(target) ? ZN_SUCCESS : ZN_FAILED;
+  (void)target;
+
+  return ZN_FAILED;
 }
 
 /* INFO: st_value is a link-time vaddr; the runtime address is the mapped ELF
@@ -475,7 +412,7 @@ static struct ZnSymbolResolver *zn_new_symbol_resolver(const char *path, void *b
   void *load_base = NULL;
 
   if (base_addr != NULL) {
-    (void)zn_map_for_base((uintptr_t)base_addr, NULL, NULL, &lib_path, &load_base);
+    (void)zn_map_for_base((uintptr_t)base_addr, &lib_path, &load_base);
   }
 
   if (lib_path == NULL) {
@@ -529,21 +466,20 @@ static int zn_connect_companion(void *handle) {
   return fd;
 }
 
-/* INFO: The table is handed to a module compiled against this same header, so
-         its layout is the contract rather than an implementation detail: a field
-         that moved would hand a module the wrong function pointer without
-         anything failing to compile. Every one of those facts is asserted in
-         zn_hyos.h, which is where the contract's layout is pinned. */
+/* There is no process runtime in this build, so the entry that hands one out
+   answers what it answers in a process that hosts none. */
+static const void *zn_get_runtime(void) {
+  return NULL;
+}
 
-/* INFO: The table every Zygisk Next module is served.
+/* The table every Zygisk Next module is served.
 
-         There is one table and not one per version. The versions this fork
-         accepts are the ones the contract can be served with as it stands - the
-         gate in zn_loader.c says which ones and why - so an older table would be
-         a table for a module that is refused before it can call anything, and a
-         stub table pretending a version nothing ever reaches is a way of
-         answering a question nobody asks. Every entry here is real: a module
-         that got this far can call any of them. */
+   One table and not one per version: a module older than ZN_MODULE_API_MIN is
+   refused before it can call anything, so a second table would answer a
+   question nobody asks. The layout is the contract - a field that moved would
+   hand a module the wrong function pointer without failing to compile - and
+   every offset of it is asserted in zygisk_next_api.h's users (zn_api.h keeps
+   the gate, the daemon's C99 tests the layout through its own copy). */
 static const struct ZygiskNextAPI zn_api = {
   .pltHook = zn_plt_hook,
   .inlineHook = zn_inline_hook,
@@ -557,10 +493,7 @@ static const struct ZygiskNextAPI zn_api = {
 
   .connectCompanion = zn_connect_companion,
 
-  /* INFO: The HyperOS runtime, answered from the process and not from the
-            version: a module loaded into the spawner finds it, a module loaded
-            anywhere else is told there is none. */
-  .getRuntime = zn_hyos_runtime
+  .getRuntime = zn_get_runtime
 };
 
 const struct ZygiskNextAPI *zn_get_api(void) {

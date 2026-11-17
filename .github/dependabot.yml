@@ -20,8 +20,8 @@ updates:
         patterns:
           - "*"
 
-  # INFO: PLTI, CSOLoader and LSPlt are pinned commits rather than
-  #       released versions, so a bump means a new upstream commit. Monthly
+  # INFO: PLTI and CSOLoader are pinned commits rather than released
+  #       versions, so a bump means a new upstream commit. Monthly
   #       and ungrouped on purpose: each one changes build inputs, so each
   #       deserves its own build result to look at before it is taken.
   - package-ecosystem: "gitsubmodule"

@@ -17,10 +17,9 @@
 
 #include "daemon.h"
 
-/* INFO: Bounds how long a request may block on the daemon once connected. A
-         stalled or overloaded daemon would otherwise leave the caller - the
-         spawner collecting its one-shot boot plan, a zygote child mid-
-         specialize - hung forever on read(), since a plain blocking socket
+/* Bounds how long a request may block on the daemon once connected. A stalled
+         or overloaded daemon would otherwise leave the caller - a zygote child
+         mid-specialize - hung forever on read(), since a plain blocking socket
          has no deadline of its own. Cleared again wherever the socket stops
          being ours: the companion protocols belong to the modules, and they
          may legitimately block far longer than this budget. */
@@ -381,7 +380,7 @@ void free_modules(struct zygisk_modules *modules) {
   modules->modules_count = 0;
 }
 
-bool rezygiskd_read_zn_modules(const char *process_name, const char *process_path, const char *image_path, uint8_t retry, uint32_t retry_delay_us, struct zn_module_file **out, size_t *out_len) {
+bool rezygiskd_read_zn_modules(const char *process_name, const char *process_path, uint8_t retry, uint32_t retry_delay_us, struct zn_module_file **out, size_t *out_len) {
   *out = NULL;
   *out_len = 0;
 
@@ -393,15 +392,6 @@ bool rezygiskd_read_zn_modules(const char *process_name, const char *process_pat
   safe_write(write_uint8_t(fd, (uint8_t)ReadZnModules), "ReadZnModules action", return false);
   safe_write(write_string(fd, process_name), "process name", return false);
   safe_write(write_string(fd, process_path), "process path", return false);
-
-  /* INFO: The path the HyperOS runtime image is mapped from, which is the
-            executable on the builds where the spawner is its own file and the
-            image mapped into an ART host on the ones where it is not. Empty
-            everywhere else, and the daemon treats an empty one as "no second
-            answer" - so a process that merely inherited the runtime state (an
-            application the spawner forked) does not become a match for the
-            spawner's own path target. */
-  safe_write(write_string(fd, image_path != NULL ? image_path : ""), "runtime image path", return false);
 
   size_t len = 0;
   safe_read(read_size_t(fd, &len), "Zygisk Next modules count", return false);
@@ -444,11 +434,8 @@ bool rezygiskd_read_zn_modules(const char *process_name, const char *process_pat
       goto cleanup;
     }
 
-    /* INFO: The module id is the module directory the daemon found the library
-              in, and it is what a module is named by everywhere else: the
-              daemon's own plan, its log, and the runtime's report of a
-              specialization. Read right after the path, so the two names of one
-              module arrive together. */
+    /* The module id is the directory the library was found in, which is what a
+       module is named by everywhere else. */
     char *module_id = read_string(fd);
     if (!module_id) {
       PLOGE("reading a Zygisk Next module id");
@@ -510,109 +497,6 @@ void free_zn_module_files(struct zn_module_file *files, size_t len) {
   }
 
   free(files);
-}
-
-/* INFO: Opens the control session the HyperOS runtime reports over.
-
-         The daemon keeps the connection rather than answering it once and
-         closing, which is the difference from every request above: what comes
-         back is a session, and the descriptor is meant to be inherited by the
-         applications the spawner forks - they are the ones that report, and
-         they cannot open one of their own once they are specialized. Every
-         other exchange in this file is one request and one answer from a
-         process that can come back later; this one is the only connection that
-         outlives its request.
-
-         The send timeout is short on purpose. A report is written from inside
-         an application that is on its way to its first frame, so a daemon that
-         has stopped reading must not hold it: a report that cannot be written
-         promptly is worth less than the launch it would delay. */
-int rezygiskd_open_zn_control_session(void) {
-  int fd = rezygiskd_connect(1, REZYGISKD_RETRY_DELAY_US);
-  if (fd == -1) return -1;
-
-  if (write_uint8_t(fd, (uint8_t)OpenZnControlSession) == -1) {
-    LOGE("Failed asking VexZygiskd for a Zygisk Next control session");
-
-    close(fd);
-
-    return -1;
-  }
-
-  uint8_t res = 0;
-  if (read_uint8_t(fd, &res) == -1 || res != 1) {
-    LOGE("VexZygiskd did not open a Zygisk Next control session");
-
-    close(fd);
-
-    return -1;
-  }
-
-  set_socket_timeout(fd, 1);
-
-  return fd;
-}
-
-/* INFO: Writes one module report over an already open session.
-
-         The session is handed in rather than opened here: it is the one the
-         spawner opened and the fork passed down, and this call runs in the
-         application, which has no way to open another once it is specialized.
-
-         The whole record goes out in one sendmsg on purpose. Poll wakes the
-         daemon on the first byte, and separate writes would let it read a header
-         whose payload has not arrived yet - which it answers by ending the
-         session. Under one call the kernel copies the record into the socket
-         buffer whole, and what the daemon reads is always a record or nothing.
-
-         MSG_NOSIGNAL is the other half of that. The far end of this socket is
-         the daemon, and a daemon that has restarted - a soft reboot, a crash, a
-         replacement after a stale socket - is exactly when this write fails:
-         with SIGPIPE, whose default action would take down the application this
-         runs in, at the moment it is starting up. The flag is asked for per call
-         rather than by ignoring the signal for the whole process, because what
-         is written here is not worth changing how the target handles it. */
-bool rezygiskd_report_zn_runtime(int session_fd, const char *module_id) {
-  if (session_fd < 0 || module_id == NULL) return false;
-
-  const size_t id_len = strlen(module_id);
-  if (id_len == 0 || id_len >= ZN_CONTROL_MODULE_ID_MAX) {
-    LOGE("The Zygisk Next module id \"%s\" does not fit a report", module_id);
-
-    return false;
-  }
-
-  /* INFO: The pid is read with a raw syscall: bionic caches getpid(), and the
-            process that reports here may have been forked by the spawner
-            without going through libc, which would leave that cache describing
-            the process this one was forked from. */
-  uint8_t action = (uint8_t)ReportZnRuntime;
-  struct zn_control_report_header header = {
-    .pid = (uint32_t)syscall(__NR_getpid),
-    .module_id_len = (uint32_t)id_len
-  };
-
-  struct iovec record[3] = {
-    { .iov_base = &action, .iov_len = sizeof(action) },
-    { .iov_base = &header, .iov_len = sizeof(header) },
-    { .iov_base = (void *)module_id, .iov_len = id_len }
-  };
-
-  struct msghdr message;
-  memset(&message, 0, sizeof(message));
-  message.msg_iov = record;
-  message.msg_iovlen = 3;
-
-  const size_t total = sizeof(action) + zn_control_report_size(id_len);
-  const ssize_t written = sendmsg(session_fd, &message, MSG_NOSIGNAL);
-
-  if (written != (ssize_t)total) {
-    PLOGE("writing a Zygisk Next module report");
-
-    return false;
-  }
-
-  return true;
 }
 
 int rezygiskd_spawn_zn_companion(const char *lib_path) {
@@ -690,9 +574,8 @@ bool rezygiskd_update_mns(enum mount_namespace_state nms_state, char *buf, size_
   if (fd == -1) return false;
 
   safe_write(write_uint8_t(fd, (uint8_t)UpdateMountNamespace), "UpdateMountNamespace action", return false);
-  /* INFO: The raw syscall, for the same reason the runtime report uses it:
-            the caller may be a raw fork of the spawner whose bionic pid cache
-            still describes the parent. */
+  /* The raw syscall: the caller may be a raw fork whose bionic pid cache still
+     describes the parent. */
   safe_write(write_uint32_t(fd, (uint32_t)syscall(__NR_getpid)), "pid", return false);
   safe_write(write_uint8_t(fd, (uint8_t)nms_state), "mount namespace state", return false);
 

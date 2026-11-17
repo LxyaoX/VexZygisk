@@ -48,14 +48,12 @@ static int run_trace(int argc, char **argv) {
 
   if (do_restart) rezygiskd_zygote_restart();
 
-  /* INFO: EXITKILL only where the caller would kill the target on failure
-           anyway: a tracer death mid-injection of the spawner must leave it
-           alive and merely untraced, exactly like the detach path below. */
+  /* EXITKILL only where the caller would kill the target on failure anyway. */
   if (!trace_zygote((int)pid, do_restart)) {
-    /* INFO: A failed zygote trace must not leave a broken zygote running, so
-             it is killed. A failed hyos_spawner trace is only detached and
-             resumed: the spawner is what starts every application, and killing
-             it would leave the system unable to launch any. */
+    /* A restart traces a zygote the monitor is replacing, so a failure leaves
+       nothing worth keeping and it is killed. The first trace of a boot is only
+       detached and resumed: killing it there would leave the system with no
+       process to fork applications from. */
     if (do_restart) {
       kill((pid_t)pid, SIGKILL);
     } else {

@@ -31,9 +31,8 @@
            the entry — and nothing else. Two things a real linker does on top of
            that were therefore never done:
 
-             - DT_INIT_ARRAY was never walked, so the C++ global constructors
-               of the bundled engines never ran. LSPlt kept zeroed internal
-               state, so hooks were accepted and then did nothing.
+             - DT_INIT_ARRAY was never walked, so a library's constructors
+               never ran.
              - the object was never registered in the linker's soinfo list, so
                dl_iterate_phdr/dladdr could not see it from inside the target.
                That is what LSPosed probes when it reports "Zygisk Next API is
@@ -41,8 +40,7 @@
 
            Letting the target's own linker do the load fixes both by
            construction rather than by imitation: it walks DT_INIT_ARRAY itself
-           and publishes a soinfo. This mirrors what the reference
-           implementation does, and it is why a bundled engine needs no
+           and publishes a soinfo, and it is why a bundled engine needs no
            accommodation in the injection path at all. */
 /* INFO: The message dlopen left in the target, read back out of it. It is the
          only place the real reason (missing soname, bad ELF, denied namespace)
@@ -385,15 +383,11 @@ bool trace_zygote(int pid, bool exit_kill) {
 
   struct kernel_version version = parse_kversion();
 
-  /* INFO: EXITKILL keeps a tracer death from leaving a traced zygote behind,
-            and TRACESECCOMP lets wait_for_trace skip seccomp events.
-
-            EXITKILL is the caller's decision: for a zygote it is the right
-            trade (a tracer that dies mid-injection leaves a half-poked target
-            the monitor restarts anyway), but for the HyperOS spawner it would
-            take down the one process every application comes from - so that
-            trace runs without it and a crashed tracer leaves the spawner
-            merely untraced. */
+  /* EXITKILL keeps a tracer death from leaving a traced zygote behind, and
+     TRACESECCOMP lets wait_for_trace skip seccomp events. EXITKILL is the
+     caller's decision: it is the right trade for a zygote the monitor restarts
+     anyway, and the first trace of a boot runs without it because a failure
+     there is handled by detaching instead. */
   long seize_options = 0;
   if (version.major > 3 || (version.major == 3 && version.minor >= 8)) {
     seize_options = PTRACE_O_TRACESECCOMP;
@@ -425,11 +419,10 @@ bool trace_zygote(int pid, bool exit_kill) {
 
   LOGD("Resolved __libc_init at %p (GOT slot %p)", (void *)libc_init_resolved, (void *)libc_init_got_slot);
 
-  /* INFO: `status` intentionally still holds the stop observed right after the
-            seize: the waits above only synchronized the syscall-stop and the
-            linker, and left it untouched. SEIZE stops with SIGSTOP, either as
-            PTRACE_EVENT_STOP or as a plain SIGSTOP (event 0) when the monitor
-            already stopped the target for hand-off, as with hyos_spawner. */
+  /* `status` intentionally still holds the stop observed right after the seize:
+     the waits above only synchronized the syscall-stop and the linker. SEIZE
+     stops with SIGSTOP, either as PTRACE_EVENT_STOP or as a plain SIGSTOP
+     (event 0) when the monitor already stopped the target for the hand-off. */
   int stop_event = (int)((unsigned int)status >> 16);
   if (WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP &&
       (stop_event == PTRACE_EVENT_STOP || stop_event == 0)) {

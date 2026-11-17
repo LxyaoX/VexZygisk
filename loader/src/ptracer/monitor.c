@@ -22,7 +22,6 @@
 #include "daemon.h"
 #include "socket_utils.h"
 #include "utils.h"
-#include "zn_spawner.h"
 
 #include "monitor.h"
 #include "monitor_status.h"
@@ -33,11 +32,9 @@
          app_process64 is the classic one. Android 15 moved the ART host into
          the ART APEX, where the same role is carried by
          /apex/com.android.art/bin/artd - which is also a process the Zygisk
-         Next modules of this generation ask for by name, "name=artd" being one
-         of the two targets LSPosed declares on HyperOS. Knowing only the first
-         spelling meant such a device was never injected at all, and no module
-         of that generation ever loaded. An exec of anything else is left to
-         whichever monitor owns it.
+         Next modules of this generation ask for by name. Knowing only the
+         first spelling meant such a device was never injected at all. An exec
+         of anything else is left to whichever monitor owns it.
 
          The two are kept apart from the crash-loop counter below, which is
          about a zygote that keeps coming back rather than about every exec
@@ -45,20 +42,14 @@
 #define APP_PROCESS_NAME "/system/bin/app_process64"
 #define ART_DAEMON_NAME "/apex/com.android.art/bin/artd"
 
-/* INFO: Whether this executable is a host of the application runtime. */
-static bool is_runtime_host(const char *program) {
+/* Whether this executable is one applications come from. */
+static bool is_app_host(const char *program) {
   return strcmp(program, APP_PROCESS_NAME) == 0 || strcmp(program, ART_DAEMON_NAME) == 0;
 }
 #define CMD_ZYGOTE_INJECTED ZYGOTE64_INJECTED
 #define CMD_DAEMON_SET_INFO DAEMON64_SET_INFO
 #define CMD_DAEMON_SET_ERROR_INFO DAEMON64_SET_ERROR_INFO
 
-/* INFO: HyperOS's app spawner, the third process (besides the two zygotes)
-         that forks application processes. Both ABI monitors match it, each
-         injecting its own bitness into its own bitness spawner.
-
-         What identifies it - the file name, and the image behind it - lives in
-         zn_spawner.h and is asked for by monitor_program_is_spawner() below. */
 static bool update_status(const char *message);
 
 static const char *monitor_stop_reason = NULL;
@@ -119,12 +110,6 @@ struct rezygiskd_status {
   bool zygote_injected;
   bool daemon_running;
 
-  /* INFO: Whether this monitor has ever recognised the HyperOS spawner.
-            Latched, because the question the card answers is "did it ever
-            happen", and because nothing downstream of the Zygisk Next path
-            can happen until it does. */
-  bool spawner_seen;
-
   pid_t daemon_pid;
   char *daemon_error_info;
 };
@@ -133,7 +118,6 @@ static struct rezygiskd_status status = {
   .supported = false,
   .zygote_injected = false,
   .daemon_running = false,
-  .spawner_seen = false,
   .daemon_pid = -1,
   .daemon_error_info = NULL
 };
@@ -179,43 +163,24 @@ void monitor_events_stop() {
   monitor_events_running = false;
 }
 
-/* INFO: How often the card is written again while the Zygisk Next path has not
-         started working.
+/* How often the card is written again while the Zygisk Next path has not
+   started working.
 
-         Every other write is an event - a command, an injection - and the
-         fastest of those lands in the first moments of a boot, when most of the
-         system has not started yet. A reader then sees "no spawner" and cannot
-         tell a system that has none from one that had not started it. One slow
-         tick while the answer is still no makes the card describe a booted
-         system instead, and it stops the moment there is nothing left to wait
-         for. */
+   Every other write is an event - a command, an injection - and the fastest of
+   those lands in the first moments of a boot, when most of the system has not
+   started yet. One slow tick while the answer is still no makes the card
+   describe a booted system instead. */
 #define STATUS_REFRESH_SECONDS 60
 
-/* INFO: And how many times it is worth doing.
+/* And how many times it is worth doing.
 
-         The timer exists so that somebody reading the card after a boot sees a
-         system that has finished starting rather than one that had barely
-         begun, and because the two halves of that card arrive at different
-         times: the monitor knows at once whether it has recognised the spawner,
-         while the daemon's half - which plan was built for which process - only
-         exists once a loader has asked it, which is later. The card is written
-         on events, and the last event of a boot can land between the two.
-
-         So it ticks a fixed number of times and then stops. It used to stop
-         early, as soon as the spawner had been recognised, which is exactly the
-         wrong moment: that is the event that writes a card whose daemon half is
-         still empty, and stopping there left it empty for the rest of the
-         session.
-
-         Half an hour rather than ten minutes, because the spawner this waits
-         for does not come up on a schedule: on the device this was written for
-         it is there when applications are being started and not before, so a
-         card read twenty minutes into a boot had reported its absence for the
-         rest of the session. Past the bound the monitor goes back to writing
-         the card on events alone, which is what it did before: a device whose
-         spawner is genuinely absent would otherwise rewrite its module property
-         file every minute for as long as it is running, on behalf of a question
-         nobody is asking any more. */
+   The two halves of the card arrive at different times: the monitor knows its
+   own state at once, while the daemon's half - which plan was built for which
+   process - only exists once a loader has asked it, which is later. The card is
+   written on events, and the last event of a boot can land between the two, so
+   it ticks a fixed number of times and then stops. Past the bound the monitor
+   writes on events alone, rather than rewriting the module property file every
+   minute for a question nobody is asking any more. */
 #define STATUS_REFRESH_TICKS 30
 
 static size_t status_refresh_ticks = 0;
@@ -837,10 +802,9 @@ static bool should_stop_inject() {
 }
 
 /* INFO: How long a freshly forked daemon is given to bind its socket before the
-         socket's absence is read as "unreachable". Only exists so the zygote
-         and the spawner, which exec within milliseconds of each other on a
-         normal boot, cannot have the daemon that was just forked for them
-         mistaken for a stale one and killed. */
+         socket's absence is read as "unreachable". Only exists so the daemon
+         that was just forked cannot be mistaken for a stale one and killed
+         before it had time to bind. */
 #define DAEMON_SETTLE_SECONDS 5
 
 /* INFO: When the current daemon was forked, on the monotonic clock. */
@@ -1062,154 +1026,14 @@ bool sigchld_listener_init() {
   return true;
 }
 
-/* INFO: Whether the process that just exec'd is the spawner.
-
-         Two answers, and which one is asked depends on what the executable is:
-
-           - its file name, when that is the spawner's. Matching the name rather
-             than one fixed path is deliberate: HyperOS has shipped the binary
-             from more than one directory across releases, so whichever one the
-             running build uses has to be followed.
-           - the image mapped at offset zero, when the executable is
-             app_process64 - the name a zygote and (on the builds this exists
-             for) the spawner both read back as. A zygote has no such mapping; a
-             spawner whose runtime image is mapped into an app_process binary
-             does. It is the same question the injector asks from inside the
-             process, answered here from outside through the target's own maps,
-             which is all this side has.
-
-         Getting this wrong is not cosmetic, and it is why the name alone is not
-         enough: a spawner taken for a zygote has its execs counted as zygote
-         restarts, which stops injection for the rest of the boot, and a second
-         exec tells the daemon to drop every Zygisk Next companion - the loader
-         on the other side of that injection is where the applications already
-         forked from the spawner are talking to.
-
-         The maps are read once per ambiguous exec, not per application: only an
-         exec of app_process64 reaches the scan, and an application is forked,
-         not exec'd. */
-/* INFO: The file behind a target's executable, and whether it is one this
-         monitor could inject.
-
-         A process is recognised as the spawner by its name before anything is
-         known about the bytes, and a name is the one thing anybody can copy: a
-         binary of the same name that does not host the runtime would be
-         injected, and injecting a process that does not host it is the failure
-         that once left every application unable to start. Twenty bytes of the
-         file the kernel says this process runs answers the question the
-         injector answers from the other side, by reading the mapping itself.
-
-         Only the class and the machine are asked, not the file type: the
-         spawner's own linkage is not ours to assume, and an executable that is
-         not ET_DYN still hosts the runtime. This monitor injects the bitness it
-         was built for - arm64, the only one it is built for - so a file of
-         another width or machine is not a target however it is named.
-
-         A file that cannot be read at all is not a refusal. The name is kept as
-         the answer then, because the one case where reading fails and the name
-         is still true is a binary that has been replaced under a running
-         process, and that process is the spawner it always was. */
-static bool monitor_target_elf_matches(const char *program) {
-  int fd = open(program, O_RDONLY | O_CLOEXEC);
-  if (fd == -1) return true;
-
-  struct stat st;
-  if (fstat(fd, &st) == -1) {
-    close(fd);
-
-    return true;
-  }
-
-  if (!S_ISREG(st.st_mode)) {
-    close(fd);
-
-    return false;
-  }
-
-  unsigned char header[20];
-  size_t filled = 0;
-
-  while (filled < sizeof(header)) {
-    ssize_t got = read(fd, header + filled, sizeof(header) - filled);
-    if (got == -1) {
-      if (errno == EINTR) continue;
-
-      break;
-    }
-
-    if (got == 0) break;
-
-    filled += (size_t)got;
-  }
-
-  close(fd);
-
-  /* INFO: A short read says the file is not what it claims to be, which is a
-            refusal rather than an unreadable one: the header is twenty bytes
-            and every ELF has them. */
-  if (filled < sizeof(header)) return false;
-  if (memcmp(header, ELFMAG, SELFMAG) != 0) return false;
-  if (header[EI_CLASS] != ELFCLASS64) return false;
-
-  uint16_t machine = 0;
-  memcpy(&machine, header + 18, sizeof(machine));
-
-  return machine == EM_AARCH64;
-}
-
-bool monitor_program_is_spawner(pid_t pid, const char *program) {
-  /* INFO: The name says which process this could be, and the file behind it
-            says whether it really is one this monitor can inject. Both answers
-            are needed: the name alone is a string anybody can put on a binary,
-            and the file alone is read once per candidate rather than once per
-            fork. */
-  if (zn_spawner_map_is_spawner(program)) return monitor_target_elf_matches(program);
-
-  /* INFO: Only a runtime host is ambiguous: anything else that is not the
-            spawner by name is not the spawner. */
-  if (!is_runtime_host(program)) return false;
-
-  char pid_str[32];
-  snprintf(pid_str, sizeof(pid_str), "%d", pid);
-
-  struct maps_info *maps = parse_maps(pid_str);
-  if (maps == NULL) return false;
-
-  bool found = false;
-
-  for (size_t i = 0; i < maps->length; i++) {
-    const struct map_entry *map = &maps->maps[i];
-
-    /* INFO: The same four conditions the injector's own scan applies to a
-              mapping before it will call it the runtime: at the start of the
-              image, backed by a file, and readable - a PROT_NONE mapping is in
-              the listing too. What it cannot do from here is read the header
-              behind it, so the name is the whole answer at this distance. */
-    if (map->offset != 0 || map->dev == 0 || map->inode == 0 || map->path == NULL) continue;
-    if ((map->perms & PROT_READ) == 0) continue;
-    if (!zn_spawner_map_is_spawner(map->path)) continue;
-
-    found = true;
-
-    break;
-  }
-
-  free_maps(maps);
-
-  return found;
-}
-
-/* INFO: Which executable this monitor owns and how the tracer has to be told
-         about it. False for anything left to another monitor. The tracer and
-         the spawner flag describe the fork path's hand-off only, so a caller
-         that just needs the ownership answer - the respawn below - passes NULL
-         for both instead of keeping a second copy of the table. */
-static bool match_target(pid_t pid, const char *program, const char **tracer, bool *is_spawner) {
-  bool matched_spawner = monitor_program_is_spawner(pid, program);
-  if (!is_runtime_host(program) && !matched_spawner) return false;
+/* Which executable this monitor owns and how the tracer has to be told about
+   it. False for anything left to another monitor. The tracer describes the fork
+   path's hand-off only, so a caller that just needs the ownership answer - the
+   respawn below - passes NULL instead of keeping a second copy of the table. */
+static bool match_target(const char *program, const char **tracer) {
+  if (!is_app_host(program)) return false;
 
   if (tracer != NULL) *tracer = "./bin/zygisk-ptrace" MONITOR_ABI;
-  if (is_spawner != NULL) *is_spawner = matched_spawner;
 
   return true;
 }
@@ -1217,7 +1041,7 @@ static bool match_target(pid_t pid, const char *program, const char **tracer, bo
 /* INFO: The hand-off leaves the target stopped and untraced. Detaching with
          SIGSTOP is what lets a fresh tracer seize a process that is already
          past its exec. */
-static void launch_tracer(pid_t pid, const char *tracer, bool is_spawner) {
+static void launch_tracer(pid_t pid, const char *tracer) {
   LOGD("Detaching %d", pid);
   ptrace(PTRACE_DETACH, pid, 0, SIGSTOP);
 
@@ -1227,11 +1051,9 @@ static void launch_tracer(pid_t pid, const char *tracer, bool is_spawner) {
     char pid_str[32];
     snprintf(pid_str, sizeof(pid_str), "%d", pid);
 
-    /* INFO: Only a later zygote exec restarts the companions: the first one
-              has none yet, and the spawner is not a zygote restart at all -
-              telling the daemon otherwise makes it drop every companion and
-              leaves the apps it already forked talking to nothing. */
-    bool restart = count_zygote > 1 && !is_spawner;
+    /* Only a later zygote exec restarts the companions: the first one has none
+       yet. */
+    bool restart = count_zygote > 1;
 
     LOGI("exec tracer command: %s trace %s%s", tracer, pid_str, restart ? " --restart" : "");
 
@@ -1326,17 +1148,17 @@ pid_t monitor_parent_of(int pid) {
 
          The one event that does work is the fresh fork+exec the fork path
          already handles, so a target that predates this monitor is respawned
-         rather than taken over. init owns both the zygote and the HyperOS
-         spawner as services and forks them itself, so killing one makes init
-         start a fresh process that this monitor catches exactly the way it
-         catches them on a normal boot. The zygote is the framework's parent, so
-         its restart also replays the boot stages and re-forks system_server -
-         the one-time bootstrap a late-load user otherwise triggers by hand with
-         the root manager's "soft restart", and what makes a framework that is
-         already up agree to be injected at all.
+         rather than taken over. init owns the zygote as a service and forks it
+         itself, so killing it makes init start a fresh process that this
+         monitor catches exactly the way it catches one on a normal boot. The
+         zygote is the framework's parent, so its restart also replays the boot
+         stages and re-forks system_server - the one-time bootstrap a late-load
+         user otherwise triggers by hand with the root manager's "soft
+         restart", and what makes a framework that is already up agree to be
+         injected at all.
 
          On a normal boot this finds nothing, because the monitor starts well
-         before init ever execs either target; the scan only ever matches in a
+         before init ever execs the target; the scan only ever matches in a
          late-load session or after a monitor restart.
 
          A target is identified by three things together - its executable, its
@@ -1350,26 +1172,23 @@ static void respawn_stale_targets(void) {
     return;
   }
 
-  /* INFO: The whole directory is read before anything is killed, and each
-           target is then killed at most once - the lowest pid that matched.
+  /* The whole directory is read before anything is killed, and the target is
+     then killed once - the lowest pid that matched.
 
-           Two reasons it cannot be a kill-as-you-go scan. The executable alone
-           does not identify a target: every app process is a fork of the
-           zygote and reads back as app_process64, and there is more than one
-           init service using that executable (the secondary zygote uses the
-           32-bit one, but a WebView zygote does not). readdir returns entries
-           in directory order, so whichever one happens to come first would be
-           the one killed - possibly a user app, while the real zygote is left
-           alone and injection silently never happens. Restricting to init's
-           children removes the app processes, and taking the lowest pid picks
-           the zygote over any later, on-demand service. The zygote is init's
-           first Java process and so carries the lowest pid of any of them.
+     It cannot be a kill-as-you-go scan: the executable alone does not identify
+     the target, since every app process is a fork of the zygote and reads back
+     as app_process64, and more than one init service uses that executable (a
+     WebView zygote among them). readdir returns entries in directory order, so
+     whichever came first would be the one killed - possibly a user app, while
+     the real zygote is left alone and injection silently never happens.
+     Restricting to init's children removes the app processes, and the lowest
+     pid picks the zygote, which is init's first Java process, over any later
+     on-demand service.
 
-           Killing one target also cannot disturb the other: init can bring a
-           fresh one up while this scan is still reading /proc, and killing that
-           one too would turn the respawn into a loop. */
+     Killing once also cannot turn the respawn into a loop: a target init starts
+     while this scan is still reading /proc has a higher pid than the one being
+     killed. */
   pid_t stale_zygote = 0;
-  pid_t stale_spawner = 0;
 
   struct dirent *entry;
   while ((entry = readdir(proc)) != NULL) {
@@ -1379,42 +1198,27 @@ static void respawn_stale_targets(void) {
     long pid_value = strtol(entry->d_name, &endptr, 10);
     if (endptr == entry->d_name || *endptr != '\0' || pid_value <= 1) continue;
 
-    /* INFO: The parent is asked first, because it is the cheap question and the
-              one that excludes the most: the zygote and the spawner are init's
-              own services, so both are direct children of pid 1 - which no
-              application ever is - and the answer costs one read of
-              /proc/<pid>/stat.
-
-              Deciding by executable first is what made this scan expensive on
-              the device it exists for: every application runs app_process64,
-              so every one of them was handed to match_target(), which reads
-              that process's whole map table to rule out a HyperOS spawner
-              image. A late load runs this with a hundred applications up; the
-              maps of all of them were read to answer a question the parent id
-              had already answered. */
+    /* The parent is asked first: the zygote is init's own service, so it is a
+       direct child of pid 1 - which no application ever is - and the answer
+       costs one read of /proc/<pid>/stat. Deciding by executable first made
+       this scan expensive, since every application runs app_process64. */
     if (monitor_parent_of((int)pid_value) != 1) continue;
 
     char program[PATH_MAX];
     if (!program_matches((int)pid_value, program, sizeof(program))) continue;
 
-    bool is_spawner = false;
-    if (!match_target((pid_t)pid_value, program, NULL, &is_spawner)) continue;
+    if (!match_target(program, NULL)) continue;
 
-    pid_t *stale = is_spawner ? &stale_spawner : &stale_zygote;
-    if (*stale == 0 || (pid_t)pid_value < *stale) *stale = (pid_t)pid_value;
+    if (stale_zygote == 0 || (pid_t)pid_value < stale_zygote) stale_zygote = (pid_t)pid_value;
   }
 
   closedir(proc);
 
-  pid_t targets[2] = { stale_zygote, stale_spawner };
+  if (stale_zygote == 0) return;
 
-  for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
-    if (targets[i] == 0) continue;
+  LOGI("pid %d predates this monitor; killing it so init hands us a fresh one to inject", stale_zygote);
 
-    LOGI("pid %d predates this monitor; killing it so init hands us a fresh one to inject", targets[i]);
-
-    kill(targets[i], SIGKILL);
-  }
+  kill(stale_zygote, SIGKILL);
 }
 
 /* INFO: A child this monitor traces rather than one it spawned: the init it
@@ -1616,42 +1420,26 @@ static void tracked_slot_release(pid_t pid) {
          target for a SIGSTOP and then sat in waitpid until the stop arrived -
          inside the monitor's one and only event loop, where every daemon
          command, every other child's stop and the status timer queued behind
-         it. A target that never reported its stop, or a spawner whose freshly
-         forked daemon needed a moment, stalled the whole monitor for as long
-         as that wait and the retry sleeps around it took.
+         it. A target that never reported its stop stalled the whole monitor
+         for as long as that wait and the retry sleeps around it took.
 
-         It is two halves now. The first runs where the exec was seen: it
-         validates the target and either asks for the stop right away or, for
-         a spawner waiting on its daemon, arms a retry timer. The second runs
-         when the SIGCHLD drain delivers the stop, and launches the tracer.
-         Between the two, the loop is free.
+         It is two halves: the first runs where the exec was seen and asks for
+         the stop, the second runs when the SIGCHLD drain delivers the stop and
+         launches the tracer. Between the two, the loop is free.
 
          The entry keeps the child's tracked slot alive - the drain routes by
          that table, and the stop that completes the hand-off is one of the
          child's own events. */
 struct pending_handover {
-  /* INFO: Zero means the slot is free; pids are never 0. */
+  /* Zero means the slot is free; pids are never 0. */
   pid_t pid;
-  /* INFO: A static string - match_target hands out literals. */
+  /* A static string - match_target hands out literals. */
   const char *tracer;
-  bool is_spawner;
-  /* INFO: True while the spawner waits for the daemon that was just forked
-           for it: the stop has not been asked for yet, and the retry timer
-           is what moves it to the stopping half. */
-  bool await_daemon;
-  int daemon_attempts;
 };
 
 #define PENDING_HANDOVERS_MAX 8
 
 static struct pending_handover pending_handovers[PENDING_HANDOVERS_MAX];
-
-/* INFO: The one-shot timer that re-checks the daemon for the spawners
-         waiting on it, or -1 when the machinery could not start. */
-static int handover_retry_fd = -1;
-
-#define HANDOVER_DAEMON_ATTEMPTS 4
-#define HANDOVER_DAEMON_RETRY_MS 250
 
 static struct pending_handover *pending_handover_find(pid_t pid) {
   for (size_t i = 0; i < PENDING_HANDOVERS_MAX; i++) {
@@ -1664,84 +1452,16 @@ static struct pending_handover *pending_handover_find(pid_t pid) {
 static void pending_handover_drop(struct pending_handover *entry) {
   entry->pid = 0;
   entry->tracer = NULL;
-  entry->await_daemon = false;
-  entry->daemon_attempts = 0;
 }
 
 /* INFO: The stopping half of the request: the target gets its SIGSTOP and is
          continued, so the stop is on its way while the loop gets back to
          work. */
 static void hand_over_request_stop(struct pending_handover *entry) {
-  LOGD("Stopping %d for its tracer (spawner: %s)", entry->pid, entry->is_spawner ? "yes" : "no");
-
-  entry->await_daemon = false;
+  LOGD("Stopping %d for its tracer", entry->pid);
 
   kill(entry->pid, SIGSTOP);
   ptrace(PTRACE_CONT, entry->pid, 0, 0);
-}
-
-static void handover_retry_arm(void) {
-  if (handover_retry_fd == -1) return;
-
-  const struct itimerspec once = {
-    .it_value = {
-      .tv_nsec = (long)HANDOVER_DAEMON_RETRY_MS * 1000000L
-    }
-  };
-
-  if (timerfd_settime(handover_retry_fd, 0, &once, NULL) == -1) PLOGE("timerfd_settime");
-}
-
-static void handover_retry_callback() {
-  uint64_t expirations = 0;
-
-  /* INFO: Read to disarm it; a timerfd nobody reads stays readable. */
-  while (read(handover_retry_fd, &expirations, sizeof(expirations)) == -1 && errno == EINTR) {
-  }
-
-  bool any_waiting = false;
-
-  for (size_t i = 0; i < PENDING_HANDOVERS_MAX; i++) {
-    struct pending_handover *entry = &pending_handovers[i];
-    if (entry->pid == 0 || !entry->await_daemon) continue;
-
-    entry->daemon_attempts++;
-
-    /* INFO: The daemon settled, or the budget ran out and the spawner goes
-              in anyway - the rule the blocking loop had, on the same budget
-              of about a second, minus the sleep in the caller. */
-    if (ensure_daemon_created()) {
-      hand_over_request_stop(entry);
-    } else if (entry->daemon_attempts >= HANDOVER_DAEMON_ATTEMPTS) {
-      /* INFO: The spawner goes in anyway. Skipping it loses the whole boot's
-                runtime rather than the one thing the skip was protecting:
-                the loader waits for the daemon on its side, and the spawner
-                is the target whose window is measured in seconds exactly
-                because its daemon may have been forked in the same breath as
-                its own exec. */
-      LOGW("VexZygiskd%s not running, injecting hyos_spawner %d anyway for its loader to wait out", MONITOR_ABI, entry->pid);
-
-      hand_over_request_stop(entry);
-    } else {
-      any_waiting = true;
-    }
-  }
-
-  if (any_waiting) handover_retry_arm();
-}
-
-static bool handover_retry_init() {
-  handover_retry_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-  if (handover_retry_fd == -1) {
-    PLOGE("timerfd_create");
-
-    return false;
-  }
-
-  /* INFO: Registered even though it starts disarmed: an unfired timerfd
-            never reports, and the registration outlives the first hand-off
-            the way the loop does. */
-  return monitor_events_register_event(handover_retry_callback, handover_retry_fd, EPOLLIN);
 }
 
 /* INFO: The loop is ending - an EXIT command or a fatal epoll wait. A target
@@ -1759,16 +1479,10 @@ static void pending_handovers_abandon(void) {
 
     pending_handover_drop(entry);
   }
-
-  if (handover_retry_fd >= 0) {
-    close(handover_retry_fd);
-    handover_retry_fd = -1;
-  }
 }
 
-/* INFO: The first half of the hand-off, run where the exec was seen: decide
-         whether this monitor owns the process, and either start the stop or
-         park the spawner on the daemon retry timer.
+/* The first half of the hand-off, run where the exec was seen: decide whether
+         this monitor owns the process and ask for the stop.
 
          True means a hand-off is pending for the pid - the caller must keep
          the child's tracked slot, because the stop that completes the
@@ -1783,16 +1497,9 @@ static bool hand_over_begin(pid_t pid, const char *program) {
   }
 
   const char *tracer = NULL;
-  bool is_spawner = false;
 
-  if (!match_target(pid, program, &tracer, &is_spawner)) return false;
+  if (!match_target(program, &tracer)) return false;
 
-  if (is_spawner) status.spawner_seen = true;
-
-  /* INFO: The crash-loop counter is about the zygote restarting. The spawner
-           has its own lifecycle and execs on its own schedule, so counting
-           those execs the same way would trip the crash-loop stop after a
-           burst of app launches. */
   if (counts_as_zygote_restart(program) && should_stop_inject()) {
     LOGW("Zygote" MONITOR_ABI " restart too many times, stop injecting");
 
@@ -1812,48 +1519,10 @@ static bool hand_over_begin(pid_t pid, const char *program) {
 
   entry->pid = pid;
   entry->tracer = tracer;
-  entry->is_spawner = is_spawner;
-  entry->await_daemon = false;
-  entry->daemon_attempts = 0;
 
-  /* INFO: Both targets need the daemon, and the spawner can exec before the
-           zygote ever does, so creating it cannot be left to the zygote
-           injection. */
+  /* Asked here rather than left to the injection: the daemon has to exist by
+     the time the loader in this process connects to it. */
   if (!ensure_daemon_created()) {
-    /* INFO: The retry timer is the spawner's parking place, and only when
-              there is one: an entry parked without it would never be moved
-              again, and the child would sit in its exec stop for the rest
-              of the boot. No timer means the spawner starts its hand-off
-              immediately - the loader on its side waits out the daemon
-              anyway. */
-    if (is_spawner && handover_retry_fd != -1) {
-      /* INFO: The one way that answers false is a fork that failed - the
-                device was out of memory at the instant the spawner exec'd.
-                It is retried by the timer and not by sleeping here: the
-                retry used to hold the whole event loop, and nothing comes
-                after the spawner anyway - the runtime this injection sets up
-                is what every app of this boot registers against. */
-      entry->await_daemon = true;
-
-      handover_retry_arm();
-
-      return true;
-    }
-
-    if (is_spawner) {
-      /* INFO: The spawner goes in anyway. Skipping it loses the whole boot's
-                runtime rather than the one thing the skip was protecting:
-                the loader waits for the daemon on its side, and the spawner
-                is the target whose window is measured in seconds exactly
-                because its daemon may have been forked in the same breath
-                as its own exec. */
-      LOGW("VexZygiskd%s not running, injecting hyos_spawner %d anyway for its loader to wait out", MONITOR_ABI, pid);
-
-      hand_over_request_stop(entry);
-
-      return true;
-    }
-
     LOGW("VexZygiskd%s not running, stop injecting", MONITOR_ABI);
 
     tracing_state = STOPPING;
@@ -1890,7 +1559,7 @@ static void handle_tracked_stop(pid_t pid, int wstatus) {
         (WPTEVENT(wstatus) == 0 || WPTEVENT(wstatus) == PTRACE_EVENT_STOP)) {
       LOGD("hand-off of %d complete", pid);
 
-      launch_tracer(pid, pending->tracer, pending->is_spawner);
+      launch_tracer(pid, pending->tracer);
 
       pending_handover_drop(pending);
       tracked_slot_release(pid);
@@ -2070,7 +1739,6 @@ static bool update_status(const char *message) {
     .supported = status.supported,
     .zygote_injected = status.zygote_injected,
     .daemon_running = status.daemon_running,
-    .spawner_seen = status.spawner_seen
   };
 
   return monitor_status_update(&view, message);
@@ -2127,12 +1795,6 @@ void init_monitor() {
   /* INFO: Not fatal on its own: without it the card is only written on events,
             which is what it did before the timer existed. */
   if (!status_refresh_init()) LOGE("failed to start the status refresh timer");
-
-  /* INFO: Same tolerance: a hand-off whose daemon is still settling waits on
-            this timer, and without it that hand-off starts immediately
-            instead - the spawner's own loader waits out its daemon either
-            way. */
-  if (!handover_retry_init()) LOGE("failed to start the hand-off retry timer");
 
   monitor_events_loop();
 

@@ -1,14 +1,10 @@
 ROOT_DIR := ..
 include ../common.mk
 
-# INFO: common.mk carries the rule that builds the Rust archive, and a rule is
-#       what decides the default goal: make takes the first target of the first
-#       rule it read, and an include is read before the rest of this file. So
-#       without this line `make -C loader` would build libvexcore.a and stop,
-#       and the packaging step would then look for the shared objects it never
-#       got.
-#
-#       The goal is the one this Makefile has always defaulted to.
+# common.mk carries the rule that builds the Rust archive, and a rule decides the
+# default goal: make takes the first target of the first rule it read, and an
+# include is read before the rest of this file. Without this line `make -C
+# loader` would build libvexcore.a and stop.
 .DEFAULT_GOAL := all
 OBJ_ROOT = $(BUILD_DIR)/obj/$(BUILD_TYPE)/loader
 OBJ_DIR = $(OBJ_ROOT)/$(ARCH)
@@ -16,9 +12,9 @@ OBJ_DIR = $(OBJ_ROOT)/$(ARCH)
 ZKSU_VERSION ?= $(VER_NAME)-$(VER_CODE)-$(COMMIT_HASH)-$(BUILD_TYPE)
 
 ifeq ($(BUILD_TYPE),release)
-	# INFO: The injected library is size-sensitive on top of being hot: -Oz
-	#       plus identical code folding buys back part of what the five
-	#       statically linked engines cost, without giving up the LTO gains.
+	# The injected library is size-sensitive on top of being hot: -Oz plus
+	# identical code folding buys back part of what the statically linked
+	# engines cost, without giving up the LTO gains.
 	TYPE_CFLAGS = -Oz -flto -Wno-unused -Wno-unused-parameter       \
 				  -fvisibility=hidden -fvisibility-inlines-hidden -fno-unwind-tables \
 				  -fno-asynchronous-unwind-tables -DNDEBUG
@@ -28,24 +24,23 @@ else
 	TYPE_LDFLAGS =
 endif
 
-# INFO: The loader itself is C. The two C++ islands it links - the LSPlt bridge
-#       and the inline hook bridge - carry their own flags where they are built.
+# Everything here is C: the two hook engines that needed a C++ bridge are gone,
+# so the module only has to agree with its own headers.
 LOADER_CFLAGS = -std=c18 -D_GNU_SOURCE -Wall -Wextra -fno-stack-protector -fomit-frame-pointer \
 				-Wno-builtin-macro-redefined                                                 \
 				$(ROOT_IMPL_DEF)                                                            \
 				'-D__FILE__=__FILE_NAME__' -DZKSU_VERSION=\"$(ZKSU_VERSION)\"
 
-COMMON_LDFLAGS = -static-libstdc++ -Wl,--build-id=sha1 -Wl,--no-rosegment           \
+COMMON_LDFLAGS = -Wl,--build-id=sha1 -Wl,--no-rosegment                   \
 				 -Wl,--no-undefined-version -Wl,--fatal-warnings -Wl,--no-undefined \
-				 -Qunused-arguments -Wl,--gc-sections
+				 -Wl,--gc-sections
 
 COMMON_SRCS = src/common/daemon.c src/common/elf_util.c   \
 			  src/common/misc.c src/common/socket_utils.c
 INJECTOR_SRCS = src/injector/cpp_strings.c src/injector/entry.c \
 				src/injector/hiding.c src/injector/hook.c \
 				src/injector/ptrace_clear.c \
-				src/injector/zn_api.c src/injector/zn_hyos.c \
-				src/injector/zn_loader.c \
+				src/injector/zn_api.c src/injector/zn_loader.c \
 				src/injector/unmount.c
 PTRACER_SRCS = src/ptracer/main.c src/ptracer/monitor.c src/ptracer/monitor_status.c \
 			   src/ptracer/ptracer.c src/ptracer/utils.c
@@ -66,49 +61,10 @@ LIBPTRACE_STRIPPED = $(OBJ_DIR)/stripped/libzygisk_ptrace.so
 
 PLTI_DIR = src/external/plti
 CSOLOADER_DIR = src/external/csoloader
-IHOOK_DIR = src/external/ihook
 LZMA_DIR = src/external/lzma
 
 COMMON_INCLUDES = -Isrc/include -I$(LZMA_DIR)
-INJECTOR_INCLUDES = -Isrc/include -I$(PLTI_DIR)/src -I$(CSOLOADER_DIR)/include -I$(IHOOK_DIR)
-
-# INFO: The inline hook engine, vendored whole from YukiZygisk (Apache-2.0,
-#       (c) Anatdx) into src/external/ihook/. Its five headers are C++ and are
-#       pulled in by src/injector/ihook_shim.cpp, which is the only translation
-#       unit that sees them; the assembler file beside them holds the capture
-#       stub the engine copies into each trampoline, and is built below.
-#
-#       This replaced Dobby, which served the same one entry - the Zygisk Next
-#       inlineHook - and was the fork's only reason to vendor a second hooking
-#       engine at all.
-IHOOK_ASM_SRC = $(IHOOK_DIR)/ihook_self_unmap.S
-IHOOK_ASM_OBJ = $(OBJ_DIR)/external/ihook/ihook_self_unmap.o
-
-# INFO: LSPlt serves the Zygisk Next pltHook - the engine the modules serviced
-#       here were compiled against, and the one YukiZygisk vendors as well.
-#       It is C++ and ships no plain Makefile, so its two sources are compiled
-#       here. Its own build defaults for the C++ runtime are kept (no
-#       -fno-exceptions/-fno-rtti) because it leans on the standard library,
-#       which the final -static-libstdc++ link bundles.
-#
-#       LOG_DISABLED maps every one of its LOG* to 0, which is how the
-#       reference builds it too. It matters twice here: LSPlt logs under the
-#       "LSPlt" tag, a name a detector reading logcat can look for, and
-#       dropping the calls drops the liblog dependency it would otherwise
-#       carry into every injected process.
-LSPLT_DIR = src/external/lsplt
-LSPLT_JNI = $(LSPLT_DIR)/lsplt/src/main/jni
-
-LSPLT_SRCS = lsplt.cc elf_util.cc
-LSPLT_OBJ_DIR = $(BUILD_DIR)/obj/$(BUILD_TYPE)/lsplt/$(ARCH)
-LSPLT_OBJS = $(addsuffix .o,$(addprefix $(LSPLT_OBJ_DIR)/,$(LSPLT_SRCS)))
-LSPLT_LIB = $(BUILD_DIR)/obj/$(BUILD_TYPE)/lsplt/$(ARCH)/liblsplt.a
-
-LSPLT_CXXFLAGS = -std=c++20 -D_GNU_SOURCE -DLOG_DISABLED -fno-stack-protector -fomit-frame-pointer \
-				 -Wno-unused -Wno-unused-parameter
-
-INJECTOR_CXX_SRCS = src/injector/ihook_shim.cpp src/injector/zn_lsplt_shim.cpp
-INJECTOR_CXX_OBJS = $(patsubst src/injector/%.cpp,$(OBJ_DIR)/injector/%.o,$(INJECTOR_CXX_SRCS))
+INJECTOR_INCLUDES = -Isrc/include -I$(PLTI_DIR)/src -I$(CSOLOADER_DIR)/include
 
 .PHONY: all arch clean
 
@@ -120,15 +76,13 @@ clean:
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/loader
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/plti
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/csoloader
-	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/lsplt
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/vexcore
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/vexcore-target
 
-# INFO: The build is delegated to a sub-make, so this one cannot see the
-#       sources it reads. Without a prerequisite the library would be built
-#       once and then taken as up to date forever, and a later submodule update
-#       would link a stale .a into libzygisk. LSPlt below lists its sources for
-#       the same reason, and so does the assembler file of the ihook engine.
+# Both engines are built by their own Makefiles in a sub-make, which this one
+# cannot see into: without a prerequisite the library would be built once and
+# then taken as up to date forever, and a submodule update would link a stale
+# archive.
 PLTI_INPUTS = $(shell find $(PLTI_DIR) -type f 2>/dev/null | sort)
 CSOLOADER_INPUTS = $(shell find $(CSOLOADER_DIR) -type f 2>/dev/null | sort)
 
@@ -144,19 +98,6 @@ $(CSOLOADER_LIB): $(CSOLOADER_INPUTS)
 		NDK_PATH=$(NDK_PATH) API_LEVEL=$(API_LEVEL)                   \
 		out=$(BUILD_DIR)/obj/$(BUILD_TYPE)/csoloader/$(ARCH)
 
-$(IHOOK_ASM_OBJ): $(IHOOK_ASM_SRC)
-	@mkdir -p $(dir $@)
-	$(CC_ARCH) $(NDK_CFLAGS) -D_GNU_SOURCE -fPIC -c $< -o $@
-
-$(LSPLT_OBJ_DIR)/%.cc.o: $(LSPLT_JNI)/%.cc
-	@mkdir -p $(dir $@)
-	$(CXX_ARCH) $(NDK_CFLAGS) $(LSPLT_CXXFLAGS) $(TYPE_CFLAGS)    \
-		-I$(LSPLT_JNI)/include -I$(LSPLT_JNI) -fPIC -c $< -o $@
-
-$(LSPLT_LIB): $(LSPLT_OBJS)
-	@mkdir -p $(dir $@)
-	$(AR) rcs $@ $^
-
 $(OBJ_DIR)/common/%.o: src/common/%.c
 	@mkdir -p $(dir $@)
 	$(CC_ARCH) $(NDK_CFLAGS) $(LOADER_CFLAGS) $(TYPE_CFLAGS) \
@@ -167,21 +108,14 @@ $(OBJ_DIR)/injector/%.o: src/injector/%.c
 	$(CC_ARCH) $(NDK_CFLAGS) $(LOADER_CFLAGS) $(TYPE_CFLAGS) \
 		$(INJECTOR_INCLUDES) -Dzygisk_EXPORTS -fPIC -c $< -o $@
 
-$(OBJ_DIR)/injector/%.o: src/injector/%.cpp
-	@mkdir -p $(dir $@)
-	$(CXX_ARCH) $(NDK_CFLAGS) -std=c++20 -D_GNU_SOURCE -Wall -Wextra     \
-		-fno-stack-protector -fomit-frame-pointer $(TYPE_CFLAGS)         \
-		$(INJECTOR_INCLUDES) -I$(LSPLT_JNI)/include -Dzygisk_EXPORTS     \
-		-fPIC -c $< -o $@
-
 $(OBJ_DIR)/ptracer/%.o: src/ptracer/%.c
 	@mkdir -p $(dir $@)
 	$(CC_ARCH) $(NDK_CFLAGS) $(LOADER_CFLAGS) $(TYPE_CFLAGS) \
 		$(COMMON_INCLUDES) -fPIE -c $< -o $@
 
-# INFO: xz-embedded, built the way its own build does: dynamic allocation for
-#       the dictionary, every integrity check accepted and its internal CRC32
-#       instead of a kernel one.
+# xz-embedded, built the way its own build does: dynamic allocation for the
+# dictionary, every integrity check accepted and its internal CRC32 instead of a
+# kernel one.
 LZMA_CFLAGS = -D_GNU_SOURCE -std=c11 -fno-stack-protector -fomit-frame-pointer \
 	-Wno-unused -Wno-sign-compare -DNDEBUG \
 	-DXZ_DEC_DYNALLOC=1 -DXZ_DEC_ANY_CHECK=1 -DXZ_INTERNAL_CRC32=1 \
@@ -198,13 +132,12 @@ $(LIBCOMMON): $(COMMON_OBJS) $(LZMA_OBJS)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
 
-$(LIBZYGISK): $(INJECTOR_OBJS) $(INJECTOR_CXX_OBJS) $(IHOOK_ASM_OBJ) $(LIBCOMMON) $(VEXCORE_LIB) $(PLTI_LIB) $(CSOLOADER_LIB) $(LSPLT_LIB)
+$(LIBZYGISK): $(INJECTOR_OBJS) $(LIBCOMMON) $(VEXCORE_LIB) $(PLTI_LIB) $(CSOLOADER_LIB)
 	@mkdir -p $(dir $@)
-	$(CXX_ARCH) -fPIC -shared -Wl,-soname,libzygisk.so                    \
+	$(CC_ARCH) -fPIC -shared -Wl,-soname,libzygisk.so                     \
 		$(COMMON_LDFLAGS) $(TYPE_LDFLAGS) -nostartfiles                   \
-		$(INJECTOR_OBJS) $(INJECTOR_CXX_OBJS) $(IHOOK_ASM_OBJ) $(LIBCOMMON) \
-		$(VEXCORE_LIB)                                                    \
-		$(PLTI_LIB) $(CSOLOADER_LIB) $(LSPLT_LIB)                        \
+		$(INJECTOR_OBJS) $(LIBCOMMON) $(VEXCORE_LIB)                      \
+		$(PLTI_LIB) $(CSOLOADER_LIB)                                      \
 		-llog -lm -o $@
 
 $(LIBPTRACE): $(PTRACER_OBJS) $(LIBCOMMON) $(VEXCORE_LIB)

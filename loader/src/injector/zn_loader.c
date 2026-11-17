@@ -19,7 +19,6 @@
 #include "zygisk_paths.h"
 
 #include "zn_api.h"
-#include "zn_hyos.h"
 #include "zn_loader.h"
 
 /* INFO: The command byte and the control buffer live in the shared protocol
@@ -52,11 +51,9 @@ static void *loaded_libs[ZN_MAX_MODULES];
 static struct zn_entry loaded_entries[ZN_MAX_MODULES];
 static size_t loaded_libs_count = 0;
 
-/* INFO: The module library is loaded from a descriptor the daemon opened and
-         passed over SCM_RIGHTS. That indirection is the only mode that works
-         for a target which cannot read /data/adb itself, which is every
-         process outside the zygote's domain - the HyperOS spawner and the apps
-         it forks among them. */
+/* The module library is loaded from a descriptor the daemon opened and passed
+   over SCM_RIGHTS: the only mode that works for a target which cannot read
+   /data/adb itself, which is every process outside the zygote's domain. */
 static void *dlopen_from_fd(int fd, const char *name, int flags) {
   android_dlextinfo info = { 0 };
   info.flags = ANDROID_DLEXT_USE_LIBRARY_FD | ANDROID_DLEXT_FORCE_LOAD;
@@ -94,16 +91,11 @@ static char *get_process_name(const char *process_path) {
   return (char *)(last_slash == NULL ? process_path : last_slash + 1);
 }
 
-/* INFO: Asks the daemon to fork a companion for the module and hands its end
-         back, as the reference does.
+/* Asks the daemon to fork a companion for the module and hands its end back.
 
-         There used to be a second path here that forked the companion inside
-         the loader. It was dropped because it cannot stand in for the daemon
-         where it would matter: the child would inherit this process's domain,
-         which on the HyperOS spawner and in the apps it forks is a restricted
-         app domain, and a companion started there cannot read the module it is
-         meant to serve. The reference has no such path either - a module whose
-         companion cannot be reached gets no companion. */
+   The companion is not forked here: the child would inherit this process's
+   domain, which in an application is a restricted app domain, and a companion
+   started there cannot read the module it is meant to serve. */
 static int spawn_companion(const char *lib_path) {
   return rezygiskd_spawn_zn_companion(lib_path);
 }
@@ -187,16 +179,7 @@ static bool load_entry(struct zn_entry *entry, void **lib_handle, int module_fd)
              option. */
   *lib_handle = lib;
 
-  /* INFO: The module is told which one it is before it is loaded, because a
-            HyperOS runtime module registers from inside onModuleLoaded and the
-            registration has to be attributable to the module that made it: it
-            is what the runtime reports, and what the daemon's record of a
-            specialization names. The runtime gets the id by pointer and keeps
-            it for the life of the process, so the entry it points into is never
-            moved or freed. */
-  zn_hyos_begin_module_registration(entry->module_id);
   module->onModuleLoaded((void *)entry, zn_get_api());
-  zn_hyos_end_module_registration();
 
   return true;
 }
@@ -315,11 +298,11 @@ static bool zn_already_loaded(const char *lib_path) {
          since the daemon opens every file on its behalf. An empty answer is a
          valid answer: a target the daemon has no entry for loads nothing, which
          is also the answer the reference gives. */
-static void load_modules_from_daemon(const char *process_name, const char *process_path, const char *image_path, uint8_t connect_retry, uint32_t connect_delay_us) {
+static void load_modules_from_daemon(const char *process_name, const char *process_path, uint8_t connect_retry, uint32_t connect_delay_us) {
   struct zn_module_file *files = NULL;
   size_t files_len = 0;
 
-  if (!rezygiskd_read_zn_modules(process_name, process_path, image_path, connect_retry, connect_delay_us, &files, &files_len)) return;
+  if (!rezygiskd_read_zn_modules(process_name, process_path, connect_retry, connect_delay_us, &files, &files_len)) return;
 
   LOGD("Got %zu Zygisk Next module(s) from VexZygiskd", files_len);
 
@@ -416,13 +399,7 @@ void zn_load_all_modules(uint8_t connect_retry, uint32_t connect_delay_us) {
 
   const char *process_name = get_process_name(process_path);
 
-  /* INFO: The second answer for a path target is the runtime image, and only
-            in the process that hosts it: an application forked from the
-            spawner inherits the runtime state and would otherwise match the
-            spawner's own path target as well. */
-  const char *image_path = zn_hyos_in_child() ? "" : zn_hyos_image_path();
-
-  load_modules_from_daemon(process_name, process_path, image_path, connect_retry, connect_delay_us);
+  load_modules_from_daemon(process_name, process_path, connect_retry, connect_delay_us);
 
   free(process_path);
 }
@@ -437,31 +414,11 @@ void zn_load_modules_for_process(const char *process_name) {
     return;
   }
 
-  load_modules_from_daemon(process_name, process_path, zn_hyos_in_child() ? "" : zn_hyos_image_path(), 1, REZYGISKD_RETRY_DELAY_US);
+  load_modules_from_daemon(process_name, process_path, 1, REZYGISKD_RETRY_DELAY_US);
 
   free(process_path);
 }
 
 size_t zn_loaded_library_count(void) {
   return loaded_libs_count;
-}
-
-/* INFO: The two halves of the HyperOS runtime's reporting path, as zn_hyos.h
-         asks for them.
-
-         Neither knows anything about the runtime, and the runtime knows nothing
-         about the daemon: what passes between them is a descriptor and a module
-         id. That is the whole reason they are handed in rather than called
-         directly from the runtime - the contract stays where the contract is,
-         and the transport stays here, next to every other exchange with the
-         daemon. */
-int zn_open_runtime_session(void) {
-  return rezygiskd_open_zn_control_session();
-}
-
-bool zn_report_runtime_module(const char *module_id) {
-  const int session = zn_hyos_child_session();
-  if (session < 0) return false;
-
-  return rezygiskd_report_zn_runtime(session, module_id);
 }

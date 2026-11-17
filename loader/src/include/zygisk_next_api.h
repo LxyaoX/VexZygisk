@@ -1,7 +1,5 @@
-/* INFO: The Zygisk Next module API, as Zygisk Next itself declares it. The
-         reference implementations this fork was ported against carry the same
-         declaration field for field, and it is kept that way on purpose: a
-         module compiled against any of them links and runs here unmodified. */
+/* The Zygisk Next module API, as Zygisk Next itself declares it: field for
+   field, so a module compiled against it links and runs here unmodified. */
 
 #pragma once
 
@@ -14,13 +12,11 @@ extern "C" {
 #endif
 
 #define ZYGISK_NEXT_API_VERSION 4
-#define ZYGISK_NEXT_HYOS_API_VERSION 1
 
 #define ZN_SUCCESS 0
 #define ZN_FAILED 1
 
 struct ZnSymbolResolver;
-struct ZygiskNextRuntime;
 
 struct ZygiskNextAPI {
     // Hook API
@@ -90,11 +86,11 @@ struct ZygiskNextAPI {
     // yourself.
     int (*connectCompanion)(void *handle);
 
-    // Return the runtime-specific API for the current process, or null if the
-    // process does not expose a supported runtime. The returned object remains
-    // valid for the lifetime of the process. Inspect its type before passing a
-    // runtime-specific module structure to registerModule.
-    const struct ZygiskNextRuntime *(*getRuntime)(void);
+    // Kept for layout: this build provides no process runtime, so the entry
+    // always answers null and a module that asks for one is told there is none.
+    // It stays in the table because the offsets of the entries after it are
+    // part of the contract.
+    const void *(*getRuntime)(void);
 };
 
 // Callbacks of an injected library
@@ -107,36 +103,6 @@ struct ZygiskNextModule {
     // executable are loaded, and before the entry (i.e. `main`) of the main
     // executable is called.
     void (*onModuleLoaded)(void *self_handle, const struct ZygiskNextAPI *api);
-};
-
-enum ZygiskNextRuntimeType {
-    ZN_RUNTIME_HYOS = 1,
-};
-
-// Read-only process specialization information for applications forked by
-// /system_ext/bin/hyos_spawner. The callback runs after the uid, gid,
-// supplementary groups, and SELinux app context have been applied. The string
-// pointers are non-null and only valid for the duration of the callback.
-struct ZnHyosAppSpecializeArgs {
-    const char *process_name;
-    const char *package_name;
-    const char *se_info;
-};
-
-// HyperOS Rust Runtime callbacks registered through
-// ZygiskNextRuntime.registerModule.
-struct ZygiskNextHyosModule {
-    int target_api_version;
-    void (*onAppSpecialized)(const struct ZnHyosAppSpecializeArgs *args);
-};
-
-// Runtime-specific API returned by getRuntime. The module structure accepted
-// by registerModule is selected by type. The runtime copies the structure
-// before registerModule returns.
-struct ZygiskNextRuntime {
-    enum ZygiskNextRuntimeType type;
-    int api_version;
-    int (*registerModule)(const void *module);
 };
 
 // Callbacks of a companion library

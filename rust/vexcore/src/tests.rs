@@ -543,15 +543,15 @@ fn the_module_id_stands_for_the_directory_name_in_a_library_path() {
     const NAMED: &CStr = c"/data/adb/modules/zygisk_lsposed";
 
     for line in [
-        c"path=/system_ext/bin/hyos_spawner /data/adb/modules/${moduleId}/lib/arm64-v8a/libzygisk.so",
-        c"path=/system_ext/bin/hyos_spawner /data/adb/modules/$moduleId/lib/arm64-v8a/libzygisk.so",
+        c"path=/system/bin/app_process64 /data/adb/modules/${moduleId}/lib/arm64-v8a/libzygisk.so",
+        c"path=/system/bin/app_process64 /data/adb/modules/$moduleId/lib/arm64-v8a/libzygisk.so",
     ] {
         assert_eq!(
             parse(line, NAMED),
             Parsed::Line {
                 is_name: false,
                 companion: false,
-                target: "/system_ext/bin/hyos_spawner".to_string(),
+                target: "/system/bin/app_process64".to_string(),
                 library: "/data/adb/modules/zygisk_lsposed/lib/arm64-v8a/libzygisk.so"
                     .to_string(),
             },

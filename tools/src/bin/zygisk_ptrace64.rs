@@ -136,10 +136,7 @@ fn dispatch_trace(args: &[String]) -> ExitCode {
 
     // SAFETY: trace_zygote only reads the pid it is handed.
     if unsafe { trace_zygote(pid) } == 0 {
-        // A failed zygote trace must not leave a broken zygote running, so it is
-        // killed. A failed hyos_spawner trace is only detached and resumed: the
-        // spawner is what starts every application, and killing it would leave
-        // the system unable to launch any.
+        // A failed zygote trace must not leave a broken zygote running.
         signal_failed_trace(pid, do_restart);
         return ExitCode::FAILURE;
     }

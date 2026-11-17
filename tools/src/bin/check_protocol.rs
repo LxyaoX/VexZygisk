@@ -1,12 +1,11 @@
 //! Guards the loader/daemon protocol against one-sided drift.
 //!
 //! The loader (loader/src/) and the daemon (zygiskd/src/) each implement their
-//! half of the wire protocol, and merging their socket helpers into one shared
-//! file is deliberately off the table: `read_string` alone has two intentional
-//! semantics (malloc'd string on the loader, bounded buffer fill on the daemon).
-//! What keeps them honest is this check - it parses both sides' headers and
-//! asserts that the action enum, the process flag macros and the socket helper
-//! surface stay identical.
+//! half of the wire protocol. The framing and the scalar readers are one
+//! header both sides include (loader/src/include/socket_protocol.h); what stays
+//! written twice is the action enum and the process flags, because each side
+//! needs them as its own declarations. This check parses both trees and asserts
+//! the two copies stay identical.
 //!
 //! The flags matter as much as the actions and are the easiest to drift: they
 //! are plain macros duplicated in both trees (`zygiskd/src/constants.h` and
@@ -30,8 +29,6 @@ const PATHS: &[(&str, &str)] = &[
     ("loader actions", "loader/src/include/daemon.h"),
     ("daemon flags", "zygiskd/src/constants.h"),
     ("loader flags", "loader/src/injector/module.h"),
-    ("daemon helpers", "zygiskd/src/utils.h"),
-    ("loader helpers", "loader/src/include/socket_utils.h"),
 ];
 
 fn main() -> ExitCode {
@@ -115,38 +112,15 @@ fn run(root: &Path) -> Result<bool, String> {
         }
     }
 
-    let daemon_helpers = helper_names(&read(root, "daemon helpers")?);
-    let loader_helpers = helper_names(&read(root, "loader helpers")?);
-
-    if daemon_helpers != loader_helpers {
-        failed = true;
-
-        println!("HELPER MISMATCH between the daemon and the loader:");
-        println!(
-            "  daemon only: {:?}",
-            only_in(&daemon_helpers, &loader_helpers)
-        );
-        println!(
-            "  loader only: {:?}",
-            only_in(&loader_helpers, &daemon_helpers)
-        );
-    }
-
     if !failed {
         println!(
-            "protocol check ok: {} actions, {} flags, {} shared helpers",
+            "protocol check ok: {} actions, {} flags",
             daemon_actions.len(),
-            daemon_flags.len(),
-            daemon_helpers.len()
+            daemon_flags.len()
         );
     }
 
     Ok(!failed)
-}
-
-/// The names present in `left` but not in `right`, in a stable order.
-fn only_in(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Vec<String> {
-    left.difference(right).cloned().collect()
 }
 
 fn read(root: &Path, key: &str) -> Result<String, String> {
@@ -341,104 +315,6 @@ fn is_identifier(text: &str) -> bool {
         && !text.as_bytes()[0].is_ascii_digit()
 }
 
-/// The wire helpers each side declares: the typed read/write families plus the
-/// fd and string primitives.
-///
-/// `read_string` is excluded on purpose - its two signatures are intentional,
-/// not drift.
-fn helper_names(text: &str) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-
-    for kind in ["write", "read"] {
-        for type_name in typed_family(text, kind) {
-            names.insert(format!("{kind}_{type_name}"));
-        }
-    }
-
-    for helper in [
-        "write_fd",
-        "read_fd",
-        "write_string",
-        "write_loop",
-        "read_loop",
-    ] {
-        if declares_function(text, helper) {
-            names.insert(helper.to_string());
-        }
-    }
-
-    names
-}
-
-/// The type names in `write_func(<type>)` and `write_func_def(<type>)`.
-///
-/// Both spellings are looked for because the loader declares the definition and
-/// the daemon the prototype, or the other way round for some of them.
-fn typed_family(text: &str, kind: &str) -> Vec<String> {
-    let mut out = Vec::new();
-
-    for suffix in ["_func", "_func_def"] {
-        let needle = format!("{kind}{suffix}(");
-
-        let mut from = 0;
-        while let Some(at) = text[from..].find(&needle) {
-            let mut index = from + at + needle.len();
-
-            // The '(' may be followed by whitespace.
-            while text[index..].starts_with([' ', '\t']) {
-                index += 1;
-            }
-
-            let name_start = index;
-            while index < text.len()
-                && (text.as_bytes()[index].is_ascii_alphanumeric()
-                    || text.as_bytes()[index] == b'_')
-            {
-                index += 1;
-            }
-
-            if index > name_start {
-                out.push(text[name_start..index].to_string());
-            }
-
-            from = index.max(from + at + needle.len());
-        }
-    }
-
-    out
-}
-
-/// True when `name(` appears as a declaration or a call, on a word boundary.
-///
-/// The Python used `\bname\s*\(`; a name is matched after a character that
-/// cannot be part of an identifier, which is what "word boundary" means for
-/// identifiers.
-fn declares_function(text: &str, name: &str) -> bool {
-    let bytes = text.as_bytes();
-
-    let mut from = 0;
-    while let Some(at) = text[from..].find(name) {
-        let start = from + at;
-        let before_ok = start == 0 || {
-            let previous = bytes[start - 1];
-            !previous.is_ascii_alphanumeric() && previous != b'_'
-        };
-
-        let mut index = start + name.len();
-        while index < bytes.len() && (bytes[index] == b' ' || bytes[index] == b'\t') {
-            index += 1;
-        }
-
-        if before_ok && index < bytes.len() && bytes[index] == b'(' {
-            return true;
-        }
-
-        from = start + name.len();
-    }
-
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,35 +404,6 @@ mod tests {
     }
 
     #[test]
-    fn both_helper_spellings_are_found() {
-        let text =
-            "void write_func(int *);\nvoid write_func_def(long *);\nint read_func(char *);\n";
-        let names = helper_names(text);
-
-        assert!(names.contains("write_int"));
-        assert!(names.contains("write_long"));
-        assert!(names.contains("read_char"));
-    }
-
-    #[test]
-    fn the_primitives_are_found_only_when_declared() {
-        let with = helper_names("void write_fd(int);\nvoid write_string(int);\n");
-        let without = helper_names("int read_fd(int);\n");
-
-        assert!(with.contains("write_fd"));
-        assert!(with.contains("write_string"));
-        assert!(without.contains("read_fd"));
-        assert!(!without.contains("write_fd"));
-    }
-
-    #[test]
-    fn a_name_embedded_in_another_is_not_a_declaration() {
-        // `my_write_fd(` must not count as `write_fd(`.
-        assert!(!declares_function("int my_write_fd(int);", "write_fd"));
-        assert!(declares_function("int write_fd(int);", "write_fd"));
-        assert!(declares_function("write_fd (int);", "write_fd"));
-    }
-
     #[test]
     fn comment_stripping_keeps_the_braces_balanced() {
         // A comment leaves a space, so the tokens either side stay separate.
