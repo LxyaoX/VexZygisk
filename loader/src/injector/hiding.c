@@ -398,14 +398,18 @@ bool hide_module_maps(void) {
             that was still whole, and acting on them now cannot race the
             reader that produced them. */
   size_t maps = 0;
+#ifndef NDEBUG
   size_t bytes = 0;
+#endif
 
   for (size_t i = 0; i < state.count; i++) {
     struct hide_target *target = &state.targets[i];
 
     if (hide_map(target)) {
       maps++;
+#ifndef NDEBUG
       bytes += target->size;
+#endif
     }
   }
 

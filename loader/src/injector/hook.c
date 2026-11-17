@@ -707,7 +707,7 @@ static void initialize_jni_hook(void) {
 
 /* INFO: Module registration and API functions */
 static void api_plt_hook_register(const char *regex, const char *symbol, void *fn, void **backup) {
-  if (!g_ctx || !regex || !symbol || !fn || g_ctx->register_info_count >= MAX_REGISTER_INFO) return;
+  if (!g_ctx || !regex || !symbol || !fn) return;
 
   regex_t re;
   if (regcomp(&re, regex, REG_NOSUB) != 0) return;
@@ -728,6 +728,20 @@ static void api_plt_hook_register(const char *regex, const char *symbol, void *f
 
   pthread_mutex_lock(&g_ctx->hook_info_lock);
 
+  /* INFO: Capacity is rechecked under the lock, right before the write. Two
+            threads racing the last slot both saw spare room in the cheap check
+            above; without this the second writes register_info[MAX_REGISTER_INFO]
+            and corrupts the adjacent ignore_info array. The callers release the
+            resources they prepared when the slot is gone. */
+  if (g_ctx->register_info_count >= MAX_REGISTER_INFO) {
+    pthread_mutex_unlock(&g_ctx->hook_info_lock);
+
+    regfree(&re);
+    free(symbol_copy);
+
+    return;
+  }
+
   g_ctx->register_info[g_ctx->register_info_count].regex = re;
   g_ctx->register_info[g_ctx->register_info_count].symbol = symbol_copy;
   g_ctx->register_info[g_ctx->register_info_count].callback = fn;
@@ -738,15 +752,27 @@ static void api_plt_hook_register(const char *regex, const char *symbol, void *f
 }
 
 static void api_plt_hook_exclude(const char *regex, const char *symbol) {
-  if (!g_ctx || !regex || g_ctx->ignore_info_count >= MAX_IGNORE_INFO) return;
+  if (!g_ctx || !regex) return;
 
   regex_t re;
   if (regcomp(&re, regex, REG_NOSUB) != 0) return;
 
+  char *symbol_copy = symbol ? strdup(symbol) : NULL;
+
   pthread_mutex_lock(&g_ctx->hook_info_lock);
 
+  /* INFO: Same lock-time recheck as the registration side, for the same race. */
+  if (g_ctx->ignore_info_count >= MAX_IGNORE_INFO) {
+    pthread_mutex_unlock(&g_ctx->hook_info_lock);
+
+    regfree(&re);
+    free(symbol_copy);
+
+    return;
+  }
+
   g_ctx->ignore_info[g_ctx->ignore_info_count].regex = re;
-  g_ctx->ignore_info[g_ctx->ignore_info_count].symbol = symbol ? strdup(symbol) : NULL;
+  g_ctx->ignore_info[g_ctx->ignore_info_count].symbol = symbol_copy;
   g_ctx->ignore_info_count++;
 
   pthread_mutex_unlock(&g_ctx->hook_info_lock);
@@ -1134,15 +1160,15 @@ static void rz_fork_pre(struct zygisk_context *ctx) {
 static jint mark_fds_allowed(struct zygisk_context *ctx, JNIEnv *env, jintArray fdsArray) {
   if (!fdsArray) return 0;
 
-  jint *arr = (*env)->GetIntArrayElements(env, fdsArray, NULL);
-
-  /* INFO: An allocation failure answers NULL, and the loop below would read the
-            array through it on the fork path. Nothing is allowed rather than a
-            crash, and the array is left alone - there is nothing to release.
-            The length is taken before the elements for that reason: the caller
-            that appends to the array needs it whether or not the contents could
-            be read, and asking for it twice bought nothing. */
+  /* INFO: An allocation failure in GetIntArrayElements answers NULL with an OOM
+            exception pending, and while one is pending the only JNI calls allowed
+            are ExceptionOccurred/ExceptionClear - calling GetArrayLength in that
+            state is a JNI violation that CheckJNI aborts on. Take the length
+            first: the caller appending to the array needs it whether or not the
+            contents could be pinned, and asking for it twice bought nothing. */
   jint len = (*env)->GetArrayLength(env, fdsArray);
+
+  jint *arr = (*env)->GetIntArrayElements(env, fdsArray, NULL);
 
   if (arr == NULL) {
     (*env)->ExceptionClear(env);
@@ -1414,6 +1440,10 @@ static bool resolve_app_uid(struct zygisk_context *ctx, uid_t *out_uid) {
     */
     const char *data_dir = (*ctx->env)->GetStringUTFChars(ctx->env, *ctx->args.app->app_data_dir, NULL);
     if (!data_dir) {
+      /* INFO: The same OOM bail-out the specialize path takes: GetStringUTFChars
+                leaves an exception pending, which would abort the next JNI call
+                in the specialize path if it were carried past this return. */
+      (*ctx->env)->ExceptionClear(ctx->env);
       LOGE("Failed to get app data directory");
 
       return false;
@@ -1727,6 +1757,11 @@ static void rz_nativeForkAndSpecialize_pre(struct zygisk_context *ctx) {
             plan are all below this line. */
   ctx->process = (*ctx->env)->GetStringUTFChars(ctx->env, *ctx->args.app->nice_name, NULL);
   if (ctx->process == NULL) {
+    /* INFO: The failure leaves an OOM exception pending; the wrapper calls the
+              original nativeForkAndSpecialize right after this returns, and a
+              pending exception aborts that JNI call under CheckJNI. The sibling
+              specialize pre clears it at the same point. */
+    (*ctx->env)->ExceptionClear(ctx->env);
     LOGW("Failed to read the process name, this process is specialized without us");
 
     return;
