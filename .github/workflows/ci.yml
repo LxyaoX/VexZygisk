@@ -18,55 +18,16 @@ jobs:
           submodules: "recursive"
           fetch-depth: 0
 
+      # INFO: The version is pinned in common.mk; this points ANDROID_HOME at
+      #       the runner's SDK and falls back to the newest NDK it has, saying
+      #       so. Same action the Trusted CI runs on main.
       - name: Setup NDK_PATH
-        # INFO: Same resolution as the Trusted CI - the version is pinned in
-        #       common.mk, this only points ANDROID_HOME at the runner's SDK -
-        #       and the same fallback: build on the newest NDK the runner has
-        #       when the pinned one is missing, and say so out loud.
-        run: |
-          set -euo pipefail
-
-          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
-          if [ -z "$sdk" ]; then
-            echo "::error::Neither ANDROID_SDK_ROOT nor ANDROID_HOME is set"
-            exit 1
-          fi
-
-          pinned=$(sed -n 's/^NDK_VERSION ?= *//p' common.mk)
-          if [ -z "$pinned" ]; then
-            echo "::error::NDK_VERSION is not pinned in common.mk"
-            exit 1
-          fi
-
-          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
-
-          if [ -d "$sdk/ndk/$pinned" ]; then
-            echo "Using the pinned NDK $pinned"
-            exit 0
-          fi
-
-          newest=$(ls -1 "$sdk/ndk" 2>/dev/null | sort -V | tail -1)
-          if [ -z "$newest" ]; then
-            echo "::error::No NDK is installed under $sdk/ndk"
-            exit 1
-          fi
-
-          echo "::warning::The pinned NDK $pinned is not installed; building on $newest instead (installed: $(ls "$sdk/ndk" | tr '\n' ' '))"
-          echo "NDK_VERSION=$newest" >> "$GITHUB_ENV"
+        uses: ./.github/actions/setup-ndk
 
       # INFO: The packaging tools are Rust, and `make` calls the signer, so they
-      #       have to exist before the build. Same commands the Trusted CI runs on
-      #       main, so a pull request is judged by what will actually run there.
+      #       have to exist before the build.
       - name: Setup Rust
-        run: |
-          rustup default "${RUST_TOOLCHAIN:-stable}"
-          rustc --version
-
-          # INFO: The loader links a `no_std` staticlib built by cargo
-          #       (rust/vexcore), and building it is this job - the device
-          #       target has to be installed here, not only in the
-          #       rust-android job that measures it.
-          rustup target add aarch64-linux-android
+        uses: ./.github/actions/setup-rust
 
       - name: Build the tools
         run: make -C tools build-host
@@ -78,13 +39,7 @@ jobs:
         run: make -C tools test-host
 
       - name: Build
-        # INFO: The same set the Trusted CI builds, not just the KernelSU
-        #       flavour: a pull request that breaks the APatch build used to
-        #       merge green, because nothing here ever built it.
-        run: |
-          make all -j$(nproc)
-          make apatch -j$(nproc)
-          make apatch-debug -j$(nproc)
+        uses: ./.github/actions/build-flavours
 
       - name: Binary size budget
         run: tools/target/release/ci-size-budget build build-apatch

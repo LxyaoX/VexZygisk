@@ -31,6 +31,7 @@
 #include "hiding.h"
 #include "unmount.h"
 #include "zn_loader.h"
+#include "zygote_targets.h"
 
 void *start_addr = NULL;
 size_t block_size = 0;
@@ -1458,23 +1459,6 @@ static void capture_clean_namespace(struct zygisk_context *ctx) {
   update_mnt_ns(Clean, true);
 }
 
-/* INFO: Whether the name is an app zygote's. Android builds one process per
-         package that declares zygotePreloadName, named "<package>_zygote", and
-         WebView has its own, "webview_zygote": a process of its own that later
-         forks its children through the zygote descriptor machinery instead of
-         through the specialization path. */
-static bool is_app_zygote_name(const char *process) {
-  static const char suffix[] = "_zygote";
-  const size_t suffix_len = sizeof(suffix) - 1;
-
-  if (process == NULL) return false;
-
-  const size_t len = strlen(process);
-  if (len <= suffix_len) return false;
-
-  return strcmp(process + len - suffix_len, suffix) == 0;
-}
-
 /* Hides the mounts of a process the denylist covers.
 
    An app zygote never gets the in-place revert, for two fatal reasons. Its mount
@@ -1574,7 +1558,7 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
 
             Which of the two isolations an app zygote gets is decided lower
             down, in isolate_denylisted. */
-  bool is_app_zygote = is_app_zygote_name(ctx->process);
+  bool is_app_zygote = zygote_process_is_app_zygote(ctx->process);
   bool is_webview_zygote = ctx->process != NULL && strcmp(ctx->process, "webview_zygote") == 0;
   bool in_denylist = (ctx->info_flags & PROCESS_ON_DENYLIST) == PROCESS_ON_DENYLIST || is_webview_zygote;
 

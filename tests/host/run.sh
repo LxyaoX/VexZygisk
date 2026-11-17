@@ -124,6 +124,15 @@ cc -std=c18 -D_GNU_SOURCE -Wall -Wextra -Werror \
    tests/host/test_hiding.c -o /tmp/test_hiding
 /tmp/test_hiding
 
+# INFO: The three comparisons that decide what gets injected and which isolation
+#       a process gets. All three are pure, and all three have been wrong once -
+#       a host spelling that was never injected, and an app zygote taken for an
+#       ordinary application.
+cc -std=c18 -D_GNU_SOURCE -Wall -Wextra -Werror \
+   -Itests/host -Iloader/src/include \
+   tests/host/test_zygote_targets.c -o /tmp/test_zygote_targets
+/tmp/test_zygote_targets
+
 cc -std=c18 -D_GNU_SOURCE -Wall -Wextra -Werror \
    -Itests/host -Iloader/src/include -Izygiskd/src -Izygiskd/src/root_impl \
    tests/host/test_apatch.c -o /tmp/test_apatch

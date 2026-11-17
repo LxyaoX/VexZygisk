@@ -1,0 +1,19 @@
+name: Setup Rust
+description: >-
+  Install the toolchain the packaging tools and the loader's Rust half are built
+  with, including the device target.
+
+# The device target is installed here and not only in the rust-android job: the
+# loader links a no_std staticlib built by cargo (rust/vexcore), so every job
+# that builds the loader needs it.
+
+runs:
+  using: composite
+  steps:
+    - name: Install the toolchain
+      shell: bash
+      run: |
+        rustup default "${RUST_TOOLCHAIN:-stable}"
+        rustc --version
+        cargo --version
+        rustup target add aarch64-linux-android

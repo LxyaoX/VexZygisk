@@ -1,0 +1,18 @@
+name: Build flavours
+description: >-
+  Build the KernelSU release, the APatch release and the APatch debug flavour.
+
+# Both workflows build the same three trees. A pull request that breaks the
+# APatch flavour used to merge green because only the KernelSU one was built
+# there, which is what the extra two lines exist to stop - and the reason they
+# are one step here instead of three lines copied into two files.
+
+runs:
+  using: composite
+  steps:
+    - name: make
+      shell: bash
+      run: |
+        make all -j"$(nproc)"
+        make apatch -j"$(nproc)"
+        make apatch-debug -j"$(nproc)"

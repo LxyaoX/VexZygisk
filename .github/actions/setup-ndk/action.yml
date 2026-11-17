@@ -1,0 +1,44 @@
+name: Setup NDK
+description: >-
+  Point ANDROID_HOME at the runner's SDK and resolve the NDK version this tree
+  pins in common.mk. Falls back to the newest installed NDK with a warning
+  rather than a hard failure.
+
+# The version lives in common.mk, not here: the build and the CI have to name
+# the same toolchain, and a second copy of the number is a second answer.
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the pinned NDK
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+        if [ -z "$sdk" ]; then
+          echo "::error::Neither ANDROID_SDK_ROOT nor ANDROID_HOME is set"
+          exit 1
+        fi
+
+        pinned=$(sed -n 's/^NDK_VERSION ?= *//p' common.mk)
+        if [ -z "$pinned" ]; then
+          echo "::error::NDK_VERSION is not pinned in common.mk"
+          exit 1
+        fi
+
+        echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+
+        if [ -d "$sdk/ndk/$pinned" ]; then
+          echo "Using the pinned NDK $pinned"
+          exit 0
+        fi
+
+        newest=$(ls -1 "$sdk/ndk" 2>/dev/null | sort -V | tail -1)
+        if [ -z "$newest" ]; then
+          echo "::error::No NDK is installed under $sdk/ndk"
+          exit 1
+        fi
+
+        echo "::warning::The pinned NDK $pinned is not installed; building on $newest instead (installed: $(ls "$sdk/ndk" | tr '\n' ' '))"
+        echo "NDK_VERSION=$newest" >> "$GITHUB_ENV"
