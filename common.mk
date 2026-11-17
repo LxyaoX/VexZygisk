@@ -3,7 +3,7 @@ BUILD_TYPE ?= debug
 API_LEVEL ?= 25
 ARCH ?= arm64-v8a
 
-VER_NAME ?= v2.4.6
+VER_NAME ?= v2.5.0
 # VER_CODE = commit count + 51: 17 commits were squashed away on 2026-09-02,
 # the last pre-squash build was 591, so the sequence continues from there.
 GIT_COUNT ?= $(shell git -C "$(ROOT_DIR)" rev-list HEAD --count 2>/dev/null || echo 540)

@@ -4,7 +4,3 @@ Copyright (C) 2026 Lxyao
 Based on ReZygisk, Copyright (C) 2026 The PerformanC Organization.
 This product is licensed under the GNU Affero General Public License v3.0 or later.
 See LICENSE file for the full license text.
-
-The inline hook engine under loader/src/external/ihook/ is taken from
-YukiZygisk, Copyright (C) Anatdx, and is licensed under the Apache License,
-Version 2.0. Each of its files carries the SPDX identifier.

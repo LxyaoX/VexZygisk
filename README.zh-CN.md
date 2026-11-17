@@ -4,7 +4,7 @@
 
 VexZygisk 是一个面向 KernelSU 与 APatch 的独立 Zygisk 实现，基于 ReZygisk。
 
-整个代码库已用 C 重写，不仅结构更清晰、更易读懂，二进制也更小更快。仅有的两处 C++ 是 vendored 引擎要求的桥接——LSPlt 桥与 inline hook 引擎——各自收敛在一个翻译单元里，注入器其余部分仍是 C。此外还引入了自定义链接器，让 VexZygisk 能够应对未来的检测手段：标准 Zygisk 模块改由内置的 csoloader 映射，不再经过系统链接器，从而规避该路径上基于链接器的检测；而 Zygisk Next 模块仍按契约预期通过系统链接器加载。
+整个代码库已用 C 重写，不仅结构更清晰、更易读懂，二进制也更小更快。此外还引入了自定义链接器，让 VexZygisk 能够应对未来的检测手段：标准 Zygisk 模块改由内置的 csoloader 映射，不再经过系统链接器，从而规避该路径上基于链接器的检测；而 Zygisk Next 模块仍按契约预期通过系统链接器加载。
 
 本项目**每次只构建一种 Root 方案**：KernelSU 版与 APatch 版是同一次 CI 运行产出的两个独立压缩包，各自只携带自己的后端——包内不含另一种 Root 方案的任何痕迹。
 
@@ -21,7 +21,6 @@ Zygisk Next 的开发者们在 Android 社区中广为人知且值得信任，�
 - 支持 KernelSU **与** APatch，并提供专用构建
 - 黑名单通过在被隐藏的进程自身中回滚挂载来处理，并以缓存好的干净命名空间作为回退
 - 连回滚够不到的痕迹也一并隐藏：被隐藏进程里仍映射着的模块库，以及 bionic 留在那个静态缓冲里的挂载行
-- 支持 HyperOS Runtime：通过 spawner 注册的模块会在应用特化时收到通知
 - 可从 LKM 启动：late-load 会话或 monitor 重启后，会重启（respawn）已在运行的进程，让真正被注入的是那一只全新的 fork
 
 ## Root 方案支持
@@ -68,7 +67,7 @@ KernelSU 可以被注入进一个已经在运行的系统——也就是那些�
 
 因此 KernelSU 版还会把自己装进 `late-load.d`——即 `ksud late-load` 在注入完成后紧接着运行的阶段。软重启会重放启动阶段但保留已注入的 KernelSU，所以正是这个阶段把 monitor 带回来；若 monitor 已在运行，它会保持不动。
 
-注入本身只在目标**全新** fork+exec 时才会发生，因此起步太晚的 monitor 用不了那些从真正开机起就一直跑着的 zygote 与 HyperOS spawner：所有注入入口等的都是这些进程早已走完的启动步骤。monitor 改为把它们重启（respawn）——各自杀掉一次，由把两者都当服务管理的 init 拉起重新的进程，再交给正常的 fork 路径注入。由于 zygote 是 system_server 的父进程，这一步正是 late-load 用户原本要手动在管理器里点一次「软重启」的那个动作，框架恢复时开机动画会重播一次。正常开机时 monitor 早于这两个进程存在，因此扫描什么也扫不到，不会改变任何行为。
+注入本身只在目标**全新** fork+exec 时才会发生，因此起步太晚的 monitor 用不了那个从真正开机起就一直跑着的 zygote：所有注入入口等的都是它早已走完的启动步骤。monitor 改为把它重启（respawn）——杀掉一次，由把它当服务管理的 init 拉起新的进程，再交给正常的 fork 路径注入。由于 zygote 是 system_server 的父进程，这一步正是 late-load 用户原本要手动在管理器里点一次「软重启」的那个动作，框架恢复时开机动画会重播一次。正常开机时 monitor 早于该进程存在，因此扫描什么也扫不到，不会改变任何行为。
 
 只有 KernelSU 版会装这个。APatch 没有对应阶段，因此 APatch 包是删除已有的副本，而不是安装一份。
 
@@ -87,13 +86,11 @@ VexZygisk 实现了 Zygisk Next API，因此针对它编写的模块——其中
 |-----------------|----------------------------------------|
 | `Android NDK`   | Android 原生开发工具包     |
 
-### C/C++ 依赖
+### C 依赖
 
 | 依赖        | 说明                                              |
 |-------------------|----------------------------------------------------------|
 | `PLTI`            | 供注入器自身使用的简单 Android PLT Hook |
-| `LSPlt`           | Android PLT Hook 库，支撑 ZN 的 `pltHook` API |
-| `ihook`           | 从 YukiZygisk 整份取用的 inline hook 引擎，支撑 ZN 的 `inlineHook` API |
 | `CSOLoader`       | 自定义 ELF 加载器，用于映射标准 Zygisk 模块          |
 | `xz-embedded`     | 用于 ELF `.gnu_debugdata` 的 XZ 解压                |
 
@@ -165,14 +162,13 @@ make ROOT_IMPL=apatch release  # explicit form
 本仓库建立在其他项目的工作之上，下面的列表说明了各部分与其来源的对应关系。
 
 * [ReZygisk](https://github.com/PerformanC/ReZygisk)：本仓库所 fork 并用 C 重写的上游项目
-* [YukiZygisk](https://github.com/Rouyashiki/YukiZygisk)：本仓库所遵循的 Zygisk Next 契约的参考实现——HyperOS Runtime（spawner 的识别方式、投递 `onAppSpecialized` 的 fork 与 `selinux_android_setcontext` hook，以及上报回传所走的控制会话）、`zn_modules.txt` 读取器、模块 API 版本门，以及整份取入 `loader/src/external/ihook/` 的 inline hook 引擎
+* [YukiZygisk](https://github.com/Rouyashiki/YukiZygisk)：Zygisk Next 契约的参考实现之一，`zn_modules.txt` 读取器与模块 API 版本门参考自它
 * [ZygiskNext](https://github.com/Dr-TSNG/ZygiskNext)：Zygisk Next 模块架构的最初设计，以及 VexZygisk 实现的那套 API
 * [ZygiskNextNext](https://github.com/VeryBaaad/ZygiskNextNext)：独立 Zygisk Next API 的参考实现
 * [Magisk](https://github.com/topjohnwu/Magisk)：现代 Android Root 与 Zygisk 本身的基石
 * [OnyxZygisk](https://github.com/OnyxZygisk/OnyxZygisk)：仅回滚的挂载模型——痕迹选择逻辑，以及被隐藏进程在自身挂载树副本上执行的就地回滚
 * [KernelSU](https://github.com/tiann/KernelSU)：KernelSU 版所通信的内核接口
 * [APatch](https://github.com/bmax121/APatch)：APatch 版一并管理的内核补丁
-* [LSPlt](https://github.com/Anatdx/LSPlt)：ZN `pltHook` API 背后的 PLT Hook 库，与 YukiZygisk 使用的是同一个
 * [PLTI](https://github.com/PerformanC/PLTI)：注入器自身使用的 PLT Hook
 * [CSOLoader](https://github.com/ThePedroo/CSOLoader)：映射标准 Zygisk 模块的自定义 ELF 加载器
 * [xz-embedded](https://tukaani.org/xz/embedded.html)：用于 `.gnu_debugdata` 的公有领域 XZ 解压器

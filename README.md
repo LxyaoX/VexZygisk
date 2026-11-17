@@ -4,7 +4,7 @@
 
 VexZygisk is a standalone implementation of Zygisk for KernelSU and APatch, based on ReZygisk.
 
-The codebase has been rewritten to C, bringing not only a much cleaner codebase that is easier to follow, but also lighter binaries that are also faster. The two places where a vendored engine is C++ - the LSPlt bridge and the inline hook engine - are confined to one translation unit each, so the rest of the injector stays C. Custom linkers also have been introduced to future-proof VexZygisk against future detections: standard Zygisk modules are mapped by the built-in csoloader instead of the system linker, defeating linker-based detection on that path, while Zygisk Next modules keep loading through the system linker as their contract expects.
+The codebase has been rewritten to C, bringing not only a much cleaner codebase that is easier to follow, but also lighter binaries that are also faster. Custom linkers also have been introduced to future-proof VexZygisk against future detections: standard Zygisk modules are mapped by the built-in csoloader instead of the system linker, defeating linker-based detection on that path, while Zygisk Next modules keep loading through the system linker as their contract expects.
 
 The project builds for **one root solution at a time**: the KernelSU flavour and the APatch flavour are separate archives produced by the same CI run, and each one carries only its own backend — no traces of the other root solution ship inside.
 
@@ -17,11 +17,10 @@ The Zygisk Next developers are famous and trusted in the Android community, howe
 ## Advantages
 
 - FOSS (Forever)
-- Zygisk Next module support, companions and the `pltHook` contract included
+- Zygisk Next module support: `zn_modules.txt` targets, companions, symbol resolvers and the module API gate
 - KernelSU **and** APatch support, as dedicated builds
 - Denylist handled by reverting the mounts in the hidden process itself, with the cached clean namespace as the fallback
 - The traces a revert cannot reach are hidden as well: the module libraries a hidden process still has mapped, and the mount line bionic keeps in one static buffer
-- HyperOS runtime support: modules that register through the spawner are told when an app is specialized
 - Starts from an LKM: a late-load session, or a restarted monitor, respawns the targets that are already running so the fresh fork is the one that gets injected
 
 ## Root solution support
@@ -108,14 +107,13 @@ the boot stages but keeps the injected KernelSU, so the same stage is what bring
 the monitor back, and it leaves an already running one alone.
 
 Injection itself only ever fires on a *fresh* fork+exec of a target, so a monitor
-that starts late cannot use the zygote and the HyperOS spawner that have been
-running since real boot: every injection entry point waits on a start-up step
-those processes are long past. The monitor respawns them instead — it kills each
-one once, and init, which owns both as services, starts fresh ones that the
-normal fork path injects. Because the zygote is the parent of system_server, this
+that starts late cannot use the zygote that have been running since real boot:
+every injection entry point waits on a start-up step that process is long past.
+The monitor respawns it instead — it kills it once, and init, which owns it as a
+service, starts a fresh one that the normal fork path injects. Because the zygote is the parent of system_server, this
 is the same one-time "soft restart" a late-load user otherwise triggers by hand
 from the root manager, and the boot animation replays once while the framework
-comes back up. On a normal boot the monitor is already up before either process
+comes back up. On a normal boot the monitor is already up before that process
 exists, so the scan finds nothing and changes nothing.
 
 Only the KernelSU flavour ships this. APatch has no comparable stage, so the
@@ -129,6 +127,7 @@ VexZygisk speaks the Zygisk Next API, so modules written against it — recent L
 - Module libraries are handed over as memfds rather than descriptors of the files themselves, so an unprivileged target can load them without touching the module files' own mode and SELinux label.
 - Zygisk and Zygisk Next modules are served side by side: a module may ship both a `zygisk/<arch>.so` and a `zn_modules.txt` (LSPosed does), and each is handled by its own path without excluding the other.
 - Modules are served the Zygisk Next API as it stands: one declaring version 3 or 4 loads, and one declaring anything else is refused rather than handed a table whose fields have moved since it was built.
+- The two hook entries of that API are refused: this build ships no PLT or inline hooking engine, so a module that calls `pltHook` or `inlineHook` is told the hook could not be placed rather than handed one that never fires. Symbol resolvers, `getBaseAddress`, `symbolLookup`, `forEachSymbols` and companions are served as usual.
 
 ## Dependencies
 
@@ -136,13 +135,11 @@ VexZygisk speaks the Zygisk Next API, so modules written against it — recent L
 |-----------------|----------------------------------------|
 | `Android NDK`   | Native Development Kit for Android     |
 
-### C/C++ Dependencies
+### C Dependencies
 
 | Dependency        | Description                                              |
 |-------------------|----------------------------------------------------------|
 | `PLTI`            | Simple PLT Hook for Android, used by the injector itself |
-| `LSPlt`           | PLT hooking library for Android, serves the ZN `pltHook` API |
-| `ihook`           | Inline hooking engine taken whole from YukiZygisk, serves the ZN `inlineHook` API |
 | `CSOLoader`       | Custom ELF loader, maps standard Zygisk modules          |
 | `xz-embedded`     | XZ decompression for ELF `.gnu_debugdata`                |
 
@@ -223,14 +220,13 @@ This repository stands on other projects' work; the credits below map the
 pieces to their sources.
 
 * [ReZygisk](https://github.com/PerformanC/ReZygisk): The base project this repository forks and rewrites in C
-* [YukiZygisk](https://github.com/Rouyashiki/YukiZygisk): The reference implementation of the Zygisk Next contract this fork follows — the HyperOS runtime (how the spawner is found, the fork and `selinux_android_setcontext` hooks that deliver `onAppSpecialized`, and the control session a report travels back over), the `zn_modules.txt` reader, the module API gate, and the inline hook engine, taken whole into `loader/src/external/ihook/`
+* [YukiZygisk](https://github.com/Rouyashiki/YukiZygisk): A reference implementation of the Zygisk Next contract, consulted for the `zn_modules.txt` reader and the module API gate
 * [ZygiskNext](https://github.com/Dr-TSNG/ZygiskNext): The original Zygisk Next module architecture and the API VexZygisk speaks
 * [ZygiskNextNext](https://github.com/VeryBaaad/ZygiskNextNext): Reference implementation for the standalone Zygisk Next API
 * [Magisk](https://github.com/topjohnwu/Magisk): The foundation of modern Android root and Zygisk itself
 * [OnyxZygisk](https://github.com/OnyxZygisk/OnyxZygisk): The revert-only mount model — the trace selection and the in-place revert a hidden process runs on its own copy of the mount tree
 * [KernelSU](https://github.com/tiann/KernelSU): The kernel interface the KernelSU flavour talks to
 * [APatch](https://github.com/bmax121/APatch): The kernel patch that the APatch flavour manages alongside
-* [LSPlt](https://github.com/Anatdx/LSPlt): PLT hooking library behind the ZN `pltHook` API, the same one YukiZygisk vendors
 * [PLTI](https://github.com/PerformanC/PLTI): PLT hooking used by the injector itself
 * [CSOLoader](https://github.com/ThePedroo/CSOLoader): The custom ELF loader that maps standard Zygisk modules
 * [xz-embedded](https://tukaani.org/xz/embedded.html): Public-domain XZ decompressor for `.gnu_debugdata`
