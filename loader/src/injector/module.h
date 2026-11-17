@@ -160,27 +160,15 @@ struct rezygisk_module {
   bool unload;
 };
 
-/*
-    INFO: What follows are function definitions to be included wherever necessary.
-            As a reminder for best C practices, a function body should not be in a header
-            since they lead to ODR violations, resulting in UB since the compiled code *can* have duplicate defintions.
-            Therefore, we have only ONE of two choices:
-              1. Put the function declarations here and their respective definitions in a separate .c file;
-              2. Inline these function definitions in the header so as to allow multiple definitions.
-          Doing otherwise, clang-tidy throws 'definitions-in-headers' warning.
+/* The function bodies below are inline so every includer may have its own copy
+   (ODR); a body in a header otherwise risks duplicate definitions.
 
-    SOURCES:
-     - https://clang.llvm.org/extra/clang-tidy/checks/misc/definitions-in-headers.html
-
-    NOTE: The original Zygisk API expects every module to implement all of the
-          specialize callbacks. Magisk's Zygisk dereferences them without a NULL
-          check, so each wrapper below skips the module rather than calling into
-          a missing entry point.
-
-          The name the skip warnings print goes through module_name(): a slot
-          that never finished loading has no image to name, and a warning that
-          crashed the process it was warning about would defeat itself.
-*/
+   NOTE: The original Zygisk API expects every module to implement all of the
+         specialize callbacks, and Magisk's Zygisk dereferences them without a
+         NULL check, so each wrapper below skips the module rather than calling
+         into a missing entry point. The name the skip warnings print goes
+         through module_name(): a slot that never finished loading has no image
+         to name. */
 static inline const char *module_name(struct rezygisk_module *m) {
   return m->lib.img != NULL && m->lib.img->elf != NULL ? m->lib.img->elf : "<unloaded module>";
 }

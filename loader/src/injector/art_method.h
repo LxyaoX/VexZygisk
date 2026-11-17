@@ -1,10 +1,8 @@
 #ifndef ART_METHOD_H
 #define ART_METHOD_H
 
-/* INFO: Single translation unit constraint — this header carries mutable
-         file-scope statics (art_method_field / data_offset) that must have
-         exactly one instance; including it from a second .c would silently
-         fork that state. Only hook.c includes it. */
+/* Single translation unit constraint: the file-scope statics below must have
+   exactly one instance, so only hook.c includes this header. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -19,13 +17,8 @@ static size_t data_offset = 0;
 
 static inline void *amethod_from_reflected_method(JNIEnv *env, jobject method);
 
-/*
-  INFO: Inlining these methods to ensure multiple definitions, avoiding ODR violations.
-          Check module.h for more info.
-
-  SOURCES:
-   - https://clang.llvm.org/extra/clang-tidy/checks/misc/definitions-in-headers.html
-*/
+/* Inline so the multiple definitions every includer gets are legal (ODR), the
+   same rule module.h follows. */
 
 static inline bool amethod_init(JNIEnv *env) {
   jclass clazz = (*env)->FindClass(env, "java/lang/reflect/Executable");

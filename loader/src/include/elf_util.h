@@ -8,8 +8,8 @@
 
 #define SHT_GNU_HASH 0x6ffffff6
 
-/* INFO: bionic's <elf.h> provides ELF_ST_TYPE, glibc does not. Kept guarded so
-         the host-side tests can compile the same source with either libc. */
+/* bionic's <elf.h> provides ELF_ST_TYPE, glibc does not; kept guarded so the
+   host tests compile against either libc. */
 #ifndef ELF_ST_TYPE
   #define ELF_ST_TYPE(info) ((info) & 0xf)
 #endif
@@ -33,9 +33,8 @@ typedef struct {
   uint32_t nbucket_;
   uint32_t *bucket_;
   uint32_t *chain_;
-  /* INFO: The chain length the section header vouches for (SysV `nchain`).
-          The lookups walk the chain with the symbol count as the index bound,
-          so the count has to fit the length the section actually holds. */
+  /* The chain length the section header vouches for (SysV nchain): the lookup
+     walks the chain with the symbol count as bound, so the count has to fit. */
   uint32_t chain_len_;
 
   uint32_t gnu_nbucket_;
@@ -45,9 +44,8 @@ typedef struct {
   uintptr_t *gnu_bloom_filter_;
   uint32_t *gnu_bucket_;
   uint32_t *gnu_chain_;
-  /* INFO: How many chain entries the section can hold, from its own extent:
-          the GNU chain's length is not written in the header, and the lookup
-          bounds its walk by the symbol count instead. */
+  /* How many chain entries the section can hold: the GNU chain's length is not
+     in the header, and the lookup bounds its walk by the symbol count. */
   uint32_t gnu_chain_len_;
 
   ElfW(Shdr) *symtab;
@@ -56,12 +54,11 @@ typedef struct {
   size_t symtab_count;
   ElfW(Sym) *symtab_start;
   ElfW(Off) symstr_offset_for_symtab;
-  /* INFO: The size of that string table, so a symbol name offset can be
-          checked against the table it is read from. */
+  /* So a symbol name offset can be checked against the table it reads from. */
   size_t symstr_size_for_symtab;
 
-  /* INFO: Mini-debug info (.gnu_debugdata): an LZMA-compressed ELF holding a
-            full .symtab for otherwise stripped system libraries. */
+  /* Mini-debug info (.gnu_debugdata): an LZMA-compressed ELF holding a full
+     .symtab for otherwise stripped system libraries. */
   uint8_t *debugdata;
   ElfW(Sym) *dd_symtab_start;
   size_t dd_symtab_count;

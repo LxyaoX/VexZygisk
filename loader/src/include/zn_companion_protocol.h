@@ -1,44 +1,34 @@
 #ifndef ZN_COMPANION_PROTOCOL_H
 #define ZN_COMPANION_PROTOCOL_H
 
-/* INFO: The wire contract of the Zygisk Next companion socket, shared by the
-         loader side that serves it (injector/zn_loader.c) and the daemon side
-         that hosts it as `zygiskd zn-companion` (zygiskd/src/zn_companion.c).
-
-         Both halves used to carry their own copy, right down to the comments,
-         and nothing checked that the two agreed: a command byte edited on one
-         side alone still compiles and only shows up as a companion that never
-         connects. One definition makes that impossible. */
+/* The wire contract of the Zygisk Next companion socket, shared by the loader
+   side that serves it (injector/zn_loader.c) and the daemon side that hosts it
+   as `zygiskd zn-companion` (zygiskd/src/zn_companion.c). Both halves used to
+   carry a copy, and a command byte edited on one side alone only showed up as a
+   companion that never connects. */
 
 #include <stdint.h>
 
 #include <sys/socket.h>
 
-/* INFO: Command byte the module sends when it calls connectCompanion. */
-#define ZN_COMPANION_CMD_CONNECT ((uint8_t)1)
-
-/* INFO: The byte the companion writes on a connection the moment it takes it
-         over, and the loader reads before it returns that socket to the module.
-         Without it the two race: the module can reach its end of the socket
-         before the companion has accepted it, and the loader hands out a socket
-         it has no evidence the companion holds. Both companion halves send it
-         from this one definition, so a locally forked companion and the
-         daemon-hosted one stay indistinguishable to the module. */
-#define ZN_COMPANION_ACK ((uint8_t)1)
-
-/* INFO: How long the loader waits for that byte. It only covers a companion
-         that is already running, so the wait is short - but it must be bounded:
-         a companion left over from an older build never acknowledges, and
-         blocking on it would turn a version skew into a hung connectCompanion
-         instead of a socket that still works. */
+/* The framing and the control-message buffer the descriptor handshake needs. */
 #include "socket_protocol.h"
 
-#define ZN_COMPANION_ACK_TIMEOUT_MS 1000
+/* Command byte the module sends when it calls connectCompanion. */
+#define ZN_COMPANION_CMD_CONNECT ((uint8_t)1)
 
-/* INFO: The control-message buffer the descriptor handshake needs is in
-         socket_protocol.h, which this header includes: it is part of the
-         framing, and the framing is now shared with the daemon. It used to be
-         written out here as a second copy, because the only shared header
-         available at the time also declared the loader's read_string. */
+/* The byte the companion writes as it takes the connection over, and the loader
+   reads before handing the socket to the module. Without it the two race: the
+   module can reach its end before the companion accepted it, and the loader
+   hands out a socket it has no evidence the companion holds. Both companion
+   halves send it from here, so a forked and a daemon-hosted companion stay
+   indistinguishable to the module. */
+#define ZN_COMPANION_ACK ((uint8_t)1)
+
+/* How long the loader waits for that byte. It covers a companion that is already
+   running, so the wait is short - but bounded: a companion from an older build
+   never acknowledges, and blocking would turn a version skew into a hung
+   connectCompanion instead of a socket that still works. */
+#define ZN_COMPANION_ACK_TIMEOUT_MS 1000
 
 #endif /* ZN_COMPANION_PROTOCOL_H */

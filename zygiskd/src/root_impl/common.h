@@ -7,9 +7,8 @@
 
 #include "../constants.h"
 
-/* INFO: The backend the daemon was built for. Only the matching member is
-         compiled in, so the switches and the name table cannot carry the
-         other root solution at all. */
+/* The backend the daemon was built for. Only the matching member is compiled in,
+   so the switches and the name table cannot carry the other root solution. */
 #ifdef ROOT_IMPL_APATCH
 enum root_impls {
   RootAPatch
@@ -28,10 +27,8 @@ struct root_impl {
   enum root_impls impl;
 };
 
-/* INFO: The display name and the kind live next to the enum so the length
-         can be derived from the one string that is actually compiled in —
-         a fixed sizeof("KernelSU") would silently overflow once a root
-         with a longer name shows up. */
+/* The display name sits next to the kind so the length follows the string that
+   is actually compiled in: sizeof("KernelSU") would overflow on a longer name. */
 #ifdef ROOT_IMPL_APATCH
   #define ROOT_IMPL_KIND RootAPatch
   #define ROOT_IMPL_NAME "APatch"
@@ -42,12 +39,10 @@ struct root_impl {
 
 #define LONGEST_ROOT_IMPL_NAME sizeof(ROOT_IMPL_NAME)
 
-/* INFO: Three answers, not two: yes, no, and "cannot tell". Both backends can be
-           asked before they are able to answer (KernelSU before a manager is
-           crowned, APatch before its scan settles), and reporting "no" in that
-           moment is not safe - the loader reads it as "ordinary app", and an
-           ordinary app that should_umount gets the root mounts reverted out of
-           its own namespace. */
+/* Three answers, not two: both backends can be asked before they can answer
+   (KernelSU before a manager is crowned, APatch before its scan settles), and
+   "no" in that moment is read by the loader as "ordinary app" - which gets the
+   root mounts reverted out of its own namespace. */
 enum uid_manager_state {
   UID_MANAGER_NO = 0,
   UID_MANAGER_YES = 1,

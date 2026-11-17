@@ -8,18 +8,17 @@
 
 #define ZYGOTE_INJECTED 4
 #define DAEMON_SET_INFO 6
-/* INFO: One module record of a DAEMON_SET_INFO announcement - a wire value
-         shared with the monitor's enum in loader/src/ptracer/monitor.h. */
+/* One module record of a DAEMON_SET_INFO announcement - a wire value shared with
+   the monitor's enum in loader/src/ptracer/monitor.h. */
 #define DAEMON_MODULE_ENTRY 9
 
-/* INFO: Plain macros rather than a typed enum: 1u << 31 does not fit an int,
-         and a fixed underlying type is a C23 extension. */
+/* Plain macros rather than a typed enum: 1u << 31 does not fit an int, and a
+   fixed underlying type is a C23 extension. */
 #define PROCESS_GRANTED_ROOT (1u << 0)
 #define PROCESS_ON_DENYLIST (1u << 1)
-/* INFO: Tells the loader whether any Zygisk Next module exists at all, so a
-         device without one can skip the per-fork ReadZnModules round trip
-         entirely. It is a global fact from the last module load, not
-         per-process, and never reaches modules (the loader strips it). */
+/* Whether any Zygisk Next module exists at all, so a device without one skips
+   the per-fork ReadZnModules round trip. A global fact from the last module
+   load, never passed on to modules (the loader strips it). */
 #define PROCESS_ZN_PRESENT (1u << 2)
 #define PROCESS_IS_MANAGER (1u << 27)
 #define PROCESS_ROOT_IS_APATCH (1u << 28)
@@ -42,20 +41,15 @@ enum DaemonSocketAction {
   ReportZnRuntime        = 12
 };
 
-/* INFO: Two states, not four: how the implementation was found is answered by
-         whether it exists at all. There used to be names for "too old" and
-         "abnormal" as well, but nothing ever assigned them and nothing read
-         them, so they only invited the reader to look for handling that was
-         never there. */
+/* Two states, not four: how the implementation was found is answered by whether
+   it exists at all. */
 enum RootImplState {
   Supported,
   Inexistent
 };
 
-/* INFO: The clean namespace is the only one the loader ever asks for - it is
-         what a denylisted process is switched into when the in-place revert
-         could not be applied. Reverting in place needs no namespace from here,
-         so no other state is carried over the protocol. */
+/* The clean namespace is the only one the loader asks for: what a denylisted
+   process is switched into when the in-place revert could not be applied. */
 enum MountNamespaceState {
   Clean
 };

@@ -30,35 +30,24 @@ static bool path_is(const char *path, const char *name) {
          memcmp(path, name, name_len) == 0;
 }
 
-/* INFO: Whether this process has to stop naming `map` in its own maps listing.
+/* Whether this process has to stop naming `map` in its own maps listing.
 
-         Named for the question, not for where the mapping comes from: the
-         answer is yes for the injector's own library and for a Zygisk Next
-         memfd as well as for a module library, and no for everything inside the
-         module directory - so "module map" would name it backwards.
+   Named for the question, not for where the mapping comes from: the answer is
+   yes for the injector's own library and for a Zygisk Next memfd as well as for
+   a module library, and no for everything else under the module directory.
 
-         The device decides a path: a module library only counts while it sits
-         on /data, and a bind mount or an sdcard can put the same names on
-         another device, where they are not ours to replace.
+   The device decides a path: a module library only counts while it sits on
+   /data, since a bind mount or an sdcard can put the same names elsewhere. The
+   memfd is the exception and is checked first - it is on no filesystem this
+   process holds a device number for, and only this loader creates that name.
 
-         The memfd is the exception, and it is checked first. A Zygisk Next
-         library is copied into one to be dlopen'd at all, and a memfd is on no
-         filesystem this process could hold a device number for - so the name
-         is the whole of what identifies it, and it is one only this loader
-         creates.
+   Shared mappings are left alone: turning one into a private copy would leave
+   the process holding a stale view of someone else's memory.
 
-         Shared mappings are left alone. They are how a process reaches ashmem
-         and the ART images, and turning one into a private copy would leave
-         it holding a stale view of someone else's memory.
-
-         The injector's own mapping is included, and it is the one that has to
-         be: the target's linker loaded it, so the linker carries a module entry
-         naming it, and an entry left pointing at nothing is a hidden process
-         that takes down the next thing to walk its module list. Replacing the
-         mapping this code runs from is safe for the reason the replacement is
-         the same bytes at the same address - the copy is moved in with its
-         permissions already set, and an instruction fetch after the move reads
-         the same code it read before. */
+   The injector's own mapping is included, and must be: the target's linker
+   loaded it and carries a module entry naming it. Replacing the mapping this
+   code runs from is safe because the copy is the same bytes at the same
+   address, moved in with its permissions already set. */
 static bool map_is_a_trace(const struct map_entry *map, dev_t data_dev) {
   const char *path = map->path;
 
@@ -154,24 +143,17 @@ static bool collect_one_map(const struct map_entry *map, void *userdata) {
   return true;
 }
 
-/* INFO: The name the copy is given, and the reason it is that name.
+/* The name the copy is given, and the reason it is that name.
 
-         An anonymous executable mapping is a signature of its own: a scan for
-         PROT_EXEC regions with nothing behind them finds this replacement
-         without ever having to ask what it replaced. A memfd has a name, and a
-         scan has to judge the name instead - so the copy is mapped from a memfd
-         named after the runtime's own JIT cache, which is an executable mapping
-         with no file of its own that every process already carries.
+   An anonymous executable mapping is a signature of its own - a scan for
+   PROT_EXEC regions with nothing behind them finds it - so the copy is mapped
+   from a memfd named after the runtime's own JIT cache: an executable mapping
+   every process already carries.
 
-         "jit-zygote-cache" rather than "jit-cache" on purpose. The JIT cache
-         belongs to the process, while the name carrying "zygote" is the one the
-         zygote creates - so an application is the last place a scan expects a
-         second one, and the last place this code is likely to collide with a
-         real one. Colliding is what it must not do: see below.
-
-         Every replacement in a process is a range of the same memfd, because
-         the check that reads these names compares the inode behind each of them
-         with the others. One memfd is one inode, so they agree. */
+   "jit-zygote-cache" rather than "jit-cache" because the name carrying "zygote"
+   is the zygote's own, so an application is the last place a scan expects a
+   second one. Every replacement in a process is a range of the same memfd,
+   since the inode behind each name has to agree with the others. */
 #define HIDE_MEMFD_NAME "jit-zygote-cache"
 
 /* INFO: memfd_create() only reaches bionic from API 30, while common.mk builds

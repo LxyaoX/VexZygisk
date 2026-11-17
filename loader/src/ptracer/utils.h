@@ -10,16 +10,14 @@
 
 #include "misc.h"
 
-/* Redefining logging macros with different tag */
 #ifndef LOG_TAG
   #define LOG_TAG "zygisk-ptrace"
 #endif
 
 #include "logging.h"
 
-/* INFO: aarch64 only: the tracer is built for arm64-v8a and traces the
-         bitness it runs as, so there is no second register file to pick
-         between. */
+/* aarch64 only: the tracer is built for arm64-v8a and traces the bitness it runs
+   as, so there is no second register file to pick between. */
 #define REG_SP sp
 #define REG_IP pc
 #define REG_RET regs[0]
@@ -39,9 +37,6 @@ void *find_module_return_addr(struct maps_info *map, const char *suffix);
 
 void *find_func_addr(struct maps_info *local_info, struct maps_info *remote_info, const char *module, const char *func);
 
-/* INFO: Translates a virtual address into its file offset through the PT_LOAD
-         segments, used to walk the GOT slots the injection hooks. */
-
 void align_stack(struct user_regs_struct *regs, long preserve);
 
 uintptr_t remote_call(int pid, struct user_regs_struct *regs, uintptr_t func_addr, uintptr_t return_addr, long *args, size_t args_size);
@@ -54,8 +49,8 @@ bool ptrace_poke_uintptr(pid_t pid, uintptr_t addr, uintptr_t value);
 
 bool wait_for_ptrace_syscall_stop(int pid, int *status);
 
-/* INFO: Returns false when the tracee's registers could not be rewritten;
-          the caller must not continue the trapped syscall in that case. */
+/* False when the tracee's registers could not be rewritten; the caller must not
+   continue the trapped syscall in that case. */
 bool tracee_skip_syscall(int pid);
 
 void wait_for_trace(int pid, int *status, int flags);
@@ -91,8 +86,8 @@ static inline const char *sigabbrev_np(int sig) {
 
 int get_program(int pid, char *buf, size_t size);
 
-/* INFO: Shared by the monitor and the injector so both read the same meaning
-         out of a waitpid status. */
+/* Shared by the monitor and the injector so both read the same meaning out of a
+   waitpid status. */
 #define STOPPED_WITH(st, sig, event) (WIFSTOPPED(st) && WSTOPSIG(st) == (sig) && ((st) >> 16) == (event))
 
 #endif /* UTILS_H */

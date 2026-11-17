@@ -36,23 +36,15 @@ void *start_addr = NULL;
 size_t block_size = 0;
 void *injector_handle = NULL;
 
-/* INFO: dlclose, reached through the exact type of the hook that calls it.
+/* dlclose, reached through the exact type of the hook that calls it.
 
-         The teardown has to leave this library with a jump and not a call: a
-         call's return would land on an instruction in a library that is gone by
-         the time it runs, which is the whole reason the reference
-         implementation wraps its own unmap in musttail. clang allows that only
-         between functions whose signatures agree - the same number of
-         parameters and the same types, which is what the two errors that
-         produced this line said in turn - and the hook around it takes the
-         (void *, size_t) of the function it replaces. dlclose takes one
-         parameter, so nothing about it matches on its own: the reference never
-         met this because munmap happens to take two, of a matching kind.
-
-         So the call goes through this, and on AArch64 the argument dlclose does
-         not declare is a register it never reads. What the cast buys is the
-         jump; the pragma is only there because the conversion is the point of
-         the line and a build does not need to be told so on every file. */
+   The teardown must leave this library with a jump and not a call: a call's
+   return would land in a library that is gone by then. clang allows musttail
+   only between functions whose signatures agree - same parameter count, same
+   types - and the hook takes the (void *, size_t) of the function it replaces
+   while dlclose takes one parameter. So the call goes through this; on AArch64
+   the extra argument is a register dlclose never reads, and the cast buys the
+   jump. */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wcast-function-type-mismatch"
 static int (*const injector_close)(void *handle, size_t unused) = (int (*)(void *, size_t))dlclose;
@@ -370,22 +362,15 @@ DCL_HOOK_FUNC(void, _ZNK18FileDescriptorInfo14ReopenOrDetach, void *_this, void 
 }
 
 static void unhook_functions(void);
-/* INFO: The teardown runs here, on the first pthread_attr_setstacksize of the
-           main thread, because that is the last moment before the application
-           executes code of its own: the hooks come off and the mappings this
-           process was never meant to name stop naming anything, before there is
-           an application around to look.
+/* The teardown runs here, on the first pthread_attr_setstacksize of the main
+   thread: the last moment before the application executes code of its own, so
+   the hooks come off and the mappings stop naming anything before there is an
+   application around to look.
 
-         The library is closed here rather than unmapped, and the difference is
-           the whole of what the process keeps. Unmapping the block by hand is
-           what an earlier design did, and it left the linker holding a module
-           entry for memory that was gone: a detector walking that list read a
-           header that had been unmapped under it and took the application down,
-           which is why the block was then kept as an anonymous copy of itself
-           instead. Closing the handle takes the entry and the mapping out
-           together, so neither problem exists to be worked around - and an
-           application that has loaded nothing of ours has nothing of ours to
-           find. */
+   The library is closed rather than unmapped. Unmapping the block by hand left
+   the linker holding a module entry for memory that was gone, and a detector
+   walking that list read a header unmapped under it and took the application
+   down. Closing the handle removes the entry and the mapping together. */
 DCL_HOOK_FUNC(int, pthread_attr_setstacksize, void *target, size_t size) {
   int res = old_pthread_attr_setstacksize((pthread_attr_t *)target, size);
   LOGV("Call pthread_attr_setstacksize in [tid, pid]: %d, %d", gettid(), getpid());
@@ -437,31 +422,22 @@ DCL_HOOK_FUNC(int, pthread_attr_setstacksize, void *target, size_t size) {
       LOGW("Failed to hide the module mappings");
     }
 
-    /* INFO: And then the library itself goes, which is the one thing that pass
-               cannot do for it: a name that has been replaced is still a
-               mapping, and a mapping is what a scan reads.
+    /* And then the library itself goes: a name that has been replaced is still a
+       mapping, and a mapping is what a scan reads.
 
-               Closing the handle is the consequence of how the injection is
-               done. The target's own linker loaded this library (ptracer.c), so
-               the loader is in that linker's module list, and unmapping the
-               block under it is what used to take an application down. dlclose
-               removes the entry and the mapping in one step.
+       Closing the handle is a consequence of the injection: the target's own
+       linker loaded this library (ptracer.c), so it sits in that linker's module
+       list, and unmapping the block under the entry is what used to take an
+       application down. dlclose removes entry and mapping in one step.
 
-               It runs after the pass above on purpose, so a linker that
-               declines to unload - bionic returns without unloading when the
-               library has handed out a TLS block - leaves the process in the
-               state every earlier release shipped: hidden, not gone. That is
-               the floor, and it is why trying costs nothing.
+       It runs after the pass above so a linker that declines to unload - bionic
+       returns without unloading when the library handed out a TLS block - leaves
+       the process hidden rather than gone, which is the floor.
 
-               musttail, for the reason the reference implementation needs it
-               for its own unmap: the return would otherwise be an instruction
-               in a library that no longer exists by the time dlclose comes
-               back. Jumping out of the frame means libart - the caller of
-               pthread_attr_setstacksize - resumes instead.
-
-               It goes through injector_close rather than calling dlclose
-               directly, because a musttail cannot change arity; the note on
-               that pointer says the rest. */
+       musttail, for the reason the reference needs it for its own unmap: the
+       return would otherwise be an instruction in a library dlclose has already
+       taken away. The call goes through injector_close because a musttail cannot
+       change arity. */
     if (injector_handle == NULL) {
       LOGD("kept libzygisk.so mapped at %p with size %zu (no handle to close)", start_addr, block_size);
 
@@ -1501,42 +1477,24 @@ static bool is_app_zygote_name(const char *process) {
   return strcmp(process + len - suffix_len, suffix) == 0;
 }
 
-/* INFO: Hides the mounts of a process the denylist covers.
+/* Hides the mounts of a process the denylist covers.
 
-         An app zygote never gets the in-place revert, for two separate reasons
-         and both of them fatal.
+   An app zygote never gets the in-place revert, for two fatal reasons. Its mount
+   tree is what every renderer it later forks inherits, and umount2 inside it
+   detaches mounts its own mountinfo still names. And the copy of the tree made
+   here would be the only member of the namespace zygote itself unshares a few
+   statements later (MountEmulatedStorage), so the kernel tears it down and takes
+   the descriptors opened in between with it: zygote's socket fds read back as
+   "/null", and the next fork aborts with "Not allowlisted (N): /null" - a
+   browser with no sandboxed process, which is no network at all.
 
-         The mount tree: it is the namespace every renderer and sandboxed
-         process it later forks inherits for the whole uptime of the process,
-         and running umount2 inside it detaches mounts its own mountinfo still
-         names - an overlay that covers provider or framework resources then
-         leaves the process resolving paths that no longer exist, which surfaces
-         as broken WebView initialization and blank module WebUIs.
+   Both are switched into the daemon's cached clean namespace instead, which
+   never had the traces and outlives that unshare.
 
-         The file descriptors: the copy this function makes belongs to the
-         process alone, so the next unshare - the one zygote itself performs a
-         few statements further into the same fork, in MountEmulatedStorage -
-         leaves it with no member at all and the kernel tears it down,
-         detaching every mount in it. Descriptors opened in between die with
-         that tree: zygote points the zygote socket descriptors at /dev/null
-         after the pre-specialize hooks have run, and once the mount behind them
-         is detached their paths read back as "/null" rather than "/dev/null".
-         Nothing notices until the process forks on its own, where zygote
-         reopens every descriptor by path and refuses the ones its allowlist no
-         longer matches - which is the app zygote of every Chromium-based
-         browser aborting with "Not allowlisted (N): /null", and an app zygote
-         that died is a browser with no sandboxed process, which is a browser
-         with no network at all.
-
-         So both are switched into the daemon's cached clean namespace instead,
-         which never had the traces and is held by the daemon, so it outlives
-         the unshare the fork performs.
-
-         The private copy comes first for everyone else: unmounting without it
-         would strip the traces out of the namespace the zygote sits in and
-         every later fork would inherit that. A refused revert, or the mode
-         being off, hides the process the namespace way instead - works as
-         well, at the cost of one shared namespace. */
+   Everyone else gets the private copy first: unmounting without it would strip
+   the traces out of the namespace the zygote sits in, and every later fork would
+   inherit that. A refused revert, or the mode being off, falls back to the
+   namespace way. */
 static void isolate_denylisted(struct zygisk_context *ctx, bool is_app_zygote) {
   FLAG_SET(ctx, DO_REVERT_UNMOUNT);
 
@@ -1624,19 +1582,12 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
 
   if (in_denylist) isolate_denylisted(ctx, is_app_zygote);
 
-  /* INFO: Executed after setns to ensure a module can update the mounts of an
-              application without worrying about it being overwritten by setns.
-  */
+  /* After setns, so a module can update the mounts of an application without
+     setns overwriting what it set up. */
   rz_run_modules_pre(ctx);
 
-  /* INFO: The modules may request that although the process is NOT in
-              the DenyList, it has its mount namespace switched to the clean
-              one.
-
-              So to ensure this behavior happens, we must also check after the
-              modules are loaded and executed, so that the modules can have
-              the chance to request it.
-  */
+  /* A module may ask for the clean namespace even though the process is not on
+     the denylist, so the flag is read after the modules have run. */
   if (!in_denylist && FLAG_GET(ctx, DO_REVERT_UNMOUNT)) update_mnt_ns(Clean, false);
 }
 
