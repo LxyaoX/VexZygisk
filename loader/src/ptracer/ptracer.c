@@ -292,6 +292,14 @@ bool inject_on_main(int pid, const char *lib_path, uintptr_t libc_init_target, u
   if (!get_regs(pid, &regs)) {
     LOGE("Failed to get regs after GOT break");
 
+    /* INFO: The slot still holds the poison from above. Nothing here can
+              reset the register state - that needs the regs get_regs failed
+              to read - but leaving the GOT pointing at -16 guarantees the next
+              indirect call faults too, whether this target is detached with
+              SIGCONT or restarted. Putting the resolved target back is the one
+              part of the recovery that is still available. */
+    ptrace_poke_uintptr(pid, libc_init_got_slot, libc_init_target);
+
     return false;
   }
 

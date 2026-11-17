@@ -126,7 +126,13 @@ static bool xz_decompress(const uint8_t *in, size_t in_size, uint8_t **out_buf, 
 
   /* INFO: The growth doubling leaves a 64 MiB allocation for what is
            usually a few hundred KiB of symbols; give the excess back. */
-  if (buffer.out_pos < capacity) {
+  /* INFO: A zero-length stream is a valid XZ stream, so out_pos can be zero
+           here. realloc(out, 0) is free(out) on bionic and returns NULL, which
+           the "keep the larger block" rule below would mistake for a refusal
+           and hand back a dangling pointer - the caller then frees it again.
+           A zero result keeps the allocation and reports a zero size; the
+           caller's ELF-header check rejects it and frees exactly once. */
+  if (buffer.out_pos > 0 && buffer.out_pos < capacity) {
     uint8_t *shrunk = (uint8_t *)realloc(out, buffer.out_pos);
 
     /* INFO: realloc to a smaller size does not move on any allocator this
@@ -573,7 +579,14 @@ static void parse_sysv_hash_section(ElfImg *img, ElfW(Shdr) *section_h, const ch
 
   img->nbucket_ = d_un[0];
 
-  if (img->nbucket_ > 0 && section_h->sh_size >= (2 + img->nbucket_ + d_un[1]) * sizeof(ElfW(Word))) {
+  /* INFO: Widen both counts before adding. `2 + nbucket + nchain` wraps in
+           32 bits for a large nchain, which would pass a short section and
+           leave chain_ pointing past the mapping; in 64 bits the sum cannot
+           overflow and the section size is compared in full. */
+  uint64_t needed = 2u + (uint64_t)img->nbucket_ + (uint64_t)d_un[1];
+  bool counts_fit = (uint64_t)section_h->sh_size / sizeof(ElfW(Word)) >= needed;
+
+  if (img->nbucket_ > 0 && counts_fit) {
     img->bucket_ = d_un + 2;
     img->chain_ = img->bucket_ + img->nbucket_;
     /* INFO: The header's own chain count, which the lookup's index bound has

@@ -575,6 +575,12 @@ static void read_daemon_modules(uint32_t modules_len) {
           goto set_info_modules_cleanup;
         }
 
+        /* INFO: The array is calloc'ed, so a half-filled one - a failed read
+                  jumps to the cleanup below - still has NULL in every slot the
+                  loop did not reach, and free_environment_information can walk
+                  the full count without touching an uninitialised pointer. */
+        module->targets_len = targets_len;
+
         for (uint32_t t = 0; t < targets_len; t++) {
           module->targets[t] = dgram_take_string(&dgram, "module target");
           if (module->targets[t] == NULL) goto set_info_modules_cleanup;

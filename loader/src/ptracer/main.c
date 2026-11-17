@@ -33,10 +33,11 @@ static int run_trace(int argc, char **argv) {
     if (strcmp(argv[i], "--restart") == 0) do_restart = true;
   }
 
-  if (do_restart) rezygiskd_zygote_restart();
-
-  /* INFO: Validated before use: a bogus pid would otherwise reach the kill()
-            below as 0, which signals the whole process group. */
+  /* INFO: Validate before any side effect: a bogus pid would otherwise reach
+            the kill() below as 0, which signals the whole process group, and
+            --restart would have already killed the live zygote before the bad
+            argument was noticed - leaving the system without a tracer for the
+            one the init process forks in its place. */
   char *pid_end = NULL;
   long pid = strtol(argv[2], &pid_end, 0);
   if (pid <= 0 || pid > INT_MAX || pid_end == argv[2] || *pid_end != '\0') {
@@ -44,6 +45,8 @@ static int run_trace(int argc, char **argv) {
 
     return 1;
   }
+
+  if (do_restart) rezygiskd_zygote_restart();
 
   /* INFO: EXITKILL only where the caller would kill the target on failure
            anyway: a tracer death mid-injection of the spawner must leave it
