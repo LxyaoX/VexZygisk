@@ -110,7 +110,8 @@ MODULE_INPUTS = $(TOOLS_INPUTS) \
         $(shell find module/src -type f | sort) \
         $(wildcard module/private_key module/public_key)
 
-.PHONY: debug release all apatch apatch-debug build clean install installAndReboot tools tools-test
+.PHONY: debug release all apatch apatch-debug build clean install installAndReboot \
+        tools tools-test analyzer
 
 # INFO: The Rust tools the packaging step calls. `cargo build --release` is what
 #       puts them at $(TOOLS_BIN); a developer who already built them pays only
@@ -204,6 +205,17 @@ install: build
 
 installAndReboot: install
 	$(REBOOT_CMD)
+
+# INFO: The same build through clang's static analyzer, which walks the paths a
+#       normal build only warns about. Nothing is packaged: the analyzer writes
+#       reports, not objects, so the link steps have nothing to produce and -k
+#       is what keeps the run going past them.
+analyzer:
+	$(MAKE) -C loader clean BUILD_TYPE=debug BUILD_DIR=$(BUILD_DIR)
+	$(MAKE) -C zygiskd clean BUILD_TYPE=debug BUILD_DIR=$(BUILD_DIR)
+	@rm -f $(LOADER_DONE) $(ZYGISKD_DONE)
+	@$(MAKE) -k BUILD_TYPE=debug ARCH=arm64-v8a $(LOADER_DONE) $(ZYGISKD_DONE) \
+		CC='$(TOOLCHAIN)/bin/clang --analyze -Wno-unused-command-line-argument -Xanalyzer -analyzer-output=text'
 
 clean:
 	rm -rf $(CURDIR)/build $(CURDIR)/build-apatch
