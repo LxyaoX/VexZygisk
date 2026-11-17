@@ -6,10 +6,9 @@
 type zygisk_file file_type
 typeattribute zygisk_file mlstrustedobject
 
-# INFO: Every domain, not zygote alone: on HyperOS applications are forked by
-#       hyos_spawner, so the spawner and every app it starts sit outside the
-#       zygote domain and hold their own end of this socket. A zygote-only rule
-#       leaves them unable to connect - a HyperOS runtime that loads nothing.
+# INFO: Every domain, not zygote alone: a Zygisk Next module is dlopened inside
+#       an application, which sits outside the zygote domain and holds its own
+#       end of this socket. A zygote-only rule leaves it unable to connect.
 allow domain zygisk_file dir {search getattr}
 allow domain zygisk_file sock_file {read write getattr open}
 
@@ -35,9 +34,9 @@ allow zygote zygote process execmem
 allow system_server system_server process execmem
 allow zygote tmpfs file *
 
-# INFO: The same tmpfs memfds, for the processes HyperOS runs outside zygote.
-#       Kept to what a dlopen performs rather than a wildcard, since this one is
-#       not limited to zygote.
+# INFO: The same tmpfs memfds for a process outside the zygote domain. Kept to
+#       what a dlopen performs rather than a wildcard, since this one is not
+#       limited to zygote.
 allow domain tmpfs file {open getattr map read execute}
 allow zygote appdomain_tmpfs file *
 
@@ -75,7 +74,7 @@ allow * @ROOT_DOMAIN@ file execute
 #       which rejects it and the installer then refuses the whole module.
 allow zygote @ROOT_DOMAIN@ memfd_file {getattr read write map execute}
 
-# INFO: The same grant for the HyperOS domains, which receive those memfds.
+# INFO: The same grant for the domains a Zygisk Next library is dlopened in.
 allow domain @ROOT_DOMAIN@ memfd_file {getattr read write map execute}
 
 allow @ROOT_DOMAIN@ @ROOT_DOMAIN@ memfd_file {getattr read write map execute}

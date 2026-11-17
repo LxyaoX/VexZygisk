@@ -220,7 +220,6 @@ This repository stands on other projects' work; the credits below map the
 pieces to their sources.
 
 * [ReZygisk](https://github.com/PerformanC/ReZygisk): The base project this repository forks and rewrites in C
-* [YukiZygisk](https://github.com/Rouyashiki/YukiZygisk): A reference implementation of the Zygisk Next contract, consulted for the `zn_modules.txt` reader and the module API gate
 * [ZygiskNext](https://github.com/Dr-TSNG/ZygiskNext): The original Zygisk Next module architecture and the API VexZygisk speaks
 * [ZygiskNextNext](https://github.com/VeryBaaad/ZygiskNextNext): Reference implementation for the standalone Zygisk Next API
 * [Magisk](https://github.com/topjohnwu/Magisk): The foundation of modern Android root and Zygisk itself

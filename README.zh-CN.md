@@ -162,7 +162,6 @@ make ROOT_IMPL=apatch release  # explicit form
 本仓库建立在其他项目的工作之上，下面的列表说明了各部分与其来源的对应关系。
 
 * [ReZygisk](https://github.com/PerformanC/ReZygisk)：本仓库所 fork 并用 C 重写的上游项目
-* [YukiZygisk](https://github.com/Rouyashiki/YukiZygisk)：Zygisk Next 契约的参考实现之一，`zn_modules.txt` 读取器与模块 API 版本门参考自它
 * [ZygiskNext](https://github.com/Dr-TSNG/ZygiskNext)：Zygisk Next 模块架构的最初设计，以及 VexZygisk 实现的那套 API
 * [ZygiskNextNext](https://github.com/VeryBaaad/ZygiskNextNext)：独立 Zygisk Next API 的参考实现
 * [Magisk](https://github.com/topjohnwu/Magisk)：现代 Android Root 与 Zygisk 本身的基石
