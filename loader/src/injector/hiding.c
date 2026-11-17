@@ -195,9 +195,15 @@ static int hide_memfd = -1;
 static off_t hide_memfd_end = 0;
 static bool hide_memfd_refused = false;
 
+/* INFO: Set once the descriptor has been closed after a pass. The mappings
+         still name /memfd:jit-zygote-cache and share one inode, so a later
+         pass must not open a second memfd under that name - two inodes with
+         the same name are exactly what the inode-consistency check flags. */
+static bool hide_memfd_sealed = false;
+
 static int hide_backing_memfd(void) {
   if (hide_memfd != -1) return hide_memfd;
-  if (hide_memfd_refused) return -1;
+  if (hide_memfd_refused || hide_memfd_sealed) return -1;
 
   int fd = (int)syscall(__NR_memfd_create, HIDE_MEMFD_NAME, MFD_CLOEXEC | MFD_EXEC);
   if (fd == -1 && errno == EINVAL) fd = (int)syscall(__NR_memfd_create, HIDE_MEMFD_NAME, MFD_CLOEXEC);
@@ -404,6 +410,27 @@ bool hide_module_maps(void) {
   }
 
   free_hide_state(&state);
+
+  /* INFO: The descriptor is scaffolding, not part of the hiding. Every copy
+            was mmap'd MAP_SHARED from it and then moved into place, so each
+            replaced range holds its own reference to the memfd's file and the
+            maps line keeps naming /memfd:jit-zygote-cache after the fd is
+            gone - closing it changes nothing an on-device scan can see.
+
+            Leaving it open, on the other hand, is fatal in an app zygote.
+            Those processes fork their sandboxed children through the zygote
+            descriptor machinery (ForkCommon -> FileDescriptorTable::Restat),
+            which walks /proc/self/fd and rejects any descriptor whose symlink
+            is not on Android's allowlist. A memfd named jit-zygote-cache is
+            not on it - only /memfd:/boot-image-methods.art is - so the fork
+            aborts with "Not allowlisted (N): /memfd:jit-zygote-cache (deleted)"
+            and the browser that owns that zygote ends up with no network. The
+            fd is closed before the process ever reaches that fork. */
+  if (hide_memfd != -1) {
+    close(hide_memfd);
+    hide_memfd = -1;
+    hide_memfd_sealed = true;
+  }
 
   if (maps > 0) LOGD("Hid %zu module map(s), %zu KiB", maps, bytes / 1024);
 
