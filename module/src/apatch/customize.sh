@@ -105,6 +105,17 @@ mv "$TMPDIR/sepolicy.rule" "$MODPATH"
 #         at install time exactly like the KernelSU flavour does.
 cp "$MODPATH/module.prop" "$MODPATH/module.prop.bak"
 
+# INFO: The monitor was stopped above, so nothing is left to put the update
+#         notice on the card between now and the next reboot. Its own EXIT
+#         handler cannot do it: ctl exit is a fire-and-forget UDP datagram and
+#         the killall lands before the monitor can write, and the extract above
+#         would overwrite the line even if it did. Write it here, after both the
+#         extract and the pristine backup, so .bak stays clean and the first
+#         boot's rezygisk.sh restores pristine before the new monitor redraws.
+if [ -f "$MODPATH/module.prop" ]; then
+  sed -i 's/^description=/description=[⏸ an update was installed - reboot to start it] /' "$MODPATH/module.prop"
+fi
+
 chmod +x "$MODPATH/uninstall.sh" "$MODPATH/action.sh"
 
 mkdir "$MODPATH/bin"
