@@ -334,7 +334,7 @@ static bool _find_module_base(ElfImg *img) {
           filter: such a symbol is a declaration the linker never resolved, so
           its st_value is 0 and turning it into an address would hand the caller
           a NULL it would then call. */
-static bool zn_collectable_symbol(ElfW(Sym) *sym, size_t strtab_size) {
+static bool collectable_symbol(ElfW(Sym) *sym, size_t strtab_size) {
   if (sym->st_name == 0 || sym->st_name >= strtab_size) return false;
   if (sym->st_shndx == SHN_UNDEF) return false;
 
@@ -363,22 +363,22 @@ static size_t calculate_valid_symtabs_amount(ElfImg *img) {
   if (has_file_symtab && img->symtab && img->section_header && img->symtab->sh_link < img->header->e_shnum)
     symtab_str_shdr = img->section_header + img->symtab->sh_link;
 
-  /* INFO: zn_collectable_symbol is the one predicate - it bounds the name
+  /* INFO: collectable_symbol is the one predicate - it bounds the name
             offset against the string table's own size, so no separate check
             is written out here (and a broken table does not log a warning
             per symbol, which a large one could spin for minutes). */
   if (has_file_symtab) for (ElfW(Off) i = 0; i < img->symtab_count; i++) {
-    if (zn_collectable_symbol(&img->symtab_start[i], symtab_str_shdr != NULL ? symtab_str_shdr->sh_size : SIZE_MAX))
+    if (collectable_symbol(&img->symtab_start[i], symtab_str_shdr != NULL ? symtab_str_shdr->sh_size : SIZE_MAX))
       count++;
   }
 
   if (has_dynsym) for (size_t i = 0; i < img->dynsym_count; i++) {
-    if (zn_collectable_symbol(&img->dynsym_start[i], img->strtab->sh_size))
+    if (collectable_symbol(&img->dynsym_start[i], img->strtab->sh_size))
       count++;
   }
 
   if (img->dd_symtab_start) for (size_t i = 0; i < img->dd_symtab_count; i++) {
-    if (zn_collectable_symbol(&img->dd_symtab_start[i], img->dd_strtab_size))
+    if (collectable_symbol(&img->dd_symtab_start[i], img->dd_strtab_size))
       count++;
   }
 
@@ -1001,7 +1001,7 @@ static bool _load_symtabs(ElfImg *img) {
 
       ElfW(Sym) *current_sym = &img->symtab_start[pos];
 
-      if (!zn_collectable_symbol(current_sym, symtab_str_shdr != NULL ? symtab_str_shdr->sh_size : SIZE_MAX)) continue;
+      if (!collectable_symbol(current_sym, symtab_str_shdr != NULL ? symtab_str_shdr->sh_size : SIZE_MAX)) continue;
 
       img->symtabs_[current_valid_index] = current_sym;
 
@@ -1018,7 +1018,7 @@ static bool _load_symtabs(ElfImg *img) {
 
     ElfW(Sym) *current_sym = &img->dynsym_start[pos];
 
-    if (!zn_collectable_symbol(current_sym, img->strtab->sh_size)) continue;
+    if (!collectable_symbol(current_sym, img->strtab->sh_size)) continue;
 
     img->symtabs_[current_valid_index] = current_sym;
 
@@ -1028,7 +1028,7 @@ static bool _load_symtabs(ElfImg *img) {
   if (has_dd_symtab) for (size_t pos = 0; pos < img->dd_symtab_count && current_valid_index < img->symtabs_count_; pos++) {
     ElfW(Sym) *current_sym = &img->dd_symtab_start[pos];
 
-    if (!zn_collectable_symbol(current_sym, img->dd_strtab_size)) continue;
+    if (!collectable_symbol(current_sym, img->dd_strtab_size)) continue;
 
     img->symtabs_[current_valid_index] = current_sym;
 
@@ -1111,7 +1111,7 @@ ElfW(Addr) LinearLookup(ElfImg *img, const char *restrict name, unsigned char *s
   for (size_t i = 0; i < img->symtabs_count_; i++) {
     ElfW(Sym) *sym = img->symtabs_[i];
 
-    /* INFO: Every entry here already passed zn_collectable_symbol, which is
+    /* INFO: Every entry here already passed collectable_symbol, which is
               the one place SHN_UNDEF and the name-offset bound are decided. */
     const char *sym_name = getSymbName(img, sym);
     if (sym_name == NULL || strcmp(name, sym_name) != 0) continue;

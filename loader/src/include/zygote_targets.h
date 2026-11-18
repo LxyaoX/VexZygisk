@@ -17,10 +17,9 @@
    the monitor exists to inject.
 
    app_process64 is the classic one. Android 15 moved the ART host into the ART
-   APEX, where the same role is carried by artd - which is also a process the
-   Zygisk Next modules of this generation ask for by name. Knowing only the first
-   spelling meant such a device was never injected at all. An exec of anything
-   else is left to whichever monitor owns it. */
+   APEX, where the same role is carried by artd. Knowing only the first spelling
+   meant such a device was never injected at all. An exec of anything else is
+   left to whichever monitor owns it. */
 #define APP_PROCESS_NAME "/system/bin/app_process64"
 #define ART_DAEMON_NAME "/apex/com.android.art/bin/artd"
 

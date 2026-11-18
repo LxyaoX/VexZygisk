@@ -20,9 +20,9 @@
 
 /* INFO: Whether `path` is exactly `name`, with the suffix a mapping keeps once
          the file behind it is gone counted as no part of the name. A prefix
-         compare answers a different question: "/memfd:zn-module" is the whole
-         of what identifies that memfd, so "/memfd:zn-module-2" is somebody
-         else's mapping and must not be replaced. */
+         compare answers a different question: a library whose path merely
+         starts with the injector's is somebody else's mapping and must not be
+         replaced. */
 static bool path_is(const char *path, const char *name) {
   size_t name_len = strlen(name);
 
@@ -33,13 +33,11 @@ static bool path_is(const char *path, const char *name) {
 /* Whether this process has to stop naming `map` in its own maps listing.
 
    Named for the question, not for where the mapping comes from: the answer is
-   yes for the injector's own library and for a Zygisk Next memfd as well as for
-   a module library, and no for everything else under the module directory.
+   yes for the injector's own library and for a module library, and no for
+   everything else under the module directory.
 
    The device decides a path: a module library only counts while it sits on
-   /data, since a bind mount or an sdcard can put the same names elsewhere. The
-   memfd is the exception and is checked first - it is on no filesystem this
-   process holds a device number for, and only this loader creates that name.
+   /data, since a bind mount or an sdcard can put the same names elsewhere.
 
    Shared mappings are left alone: turning one into a private copy would leave
    the process holding a stale view of someone else's memory.
@@ -54,8 +52,6 @@ static bool map_is_a_trace(const struct map_entry *map, dev_t data_dev) {
   if (path == NULL) return false;
 
   if (!map->is_private) return false;
-
-  if (path_is(path, ZYGISK_ZN_MEMFD)) return true;
 
   /* INFO: Checked before the module directory is excluded below, since the
             injector lives inside it. It stays mapped until the unloader runs,
@@ -230,9 +226,8 @@ static int hide_backing_memfd(void) {
   return fd;
 }
 
-/* INFO: A library that is still mapped - the injector itself, every module
-         library the loader abandons rather than unloads, and every Zygisk Next
-         library the system linker holds - names its own file in
+/* INFO: A library that is still mapped - the injector itself and every module
+         library the loader abandons rather than unloads - names its own file in
          /proc/self/maps. The mapping is replaced with a copy of the same bytes
          at the same address, so the library keeps running out of the same place
          and the name is gone.

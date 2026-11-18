@@ -4,20 +4,18 @@
 
 VexZygisk 是一个面向 KernelSU 与 APatch 的独立 Zygisk 实现，基于 ReZygisk。
 
-整个代码库已用 C 重写，不仅结构更清晰、更易读懂，二进制也更小更快。此外还引入了自定义链接器，让 VexZygisk 能够应对未来的检测手段：标准 Zygisk 模块改由内置的 csoloader 映射，不再经过系统链接器，从而规避该路径上基于链接器的检测；而 Zygisk Next 模块仍按契约预期通过系统链接器加载。
+整个代码库已用 C 重写，不仅结构更清晰、更易读懂，二进制也更小更快。此外还引入了自定义加载器，让 VexZygisk 能够应对未来的检测手段：模块库改由内置的 csoloader 映射，不再经过系统链接器，从而规避该路径上基于链接器的检测。
 
 本项目**每次只构建一种 Root 方案**：KernelSU 版与 APatch 版是同一次 CI 运行产出的两个独立压缩包，各自只携带自己的后端——包内不含另一种 Root 方案的任何痕迹。
 
 ## 为什么？
 
-Zygisk Next 近期的版本不再开源，代码被完全保留给开发者。这不仅限制了我们为其贡献代码的能力，也让代码审计变得不可能。这是严重的安全隐患，因为 Zygisk Next 是以超级用户（root）权限运行的模块，能够访问整个系统。
-
-Zygisk Next 的开发者们在 Android 社区中广为人知且值得信任，但这并不意味着它的代码就没有恶意或漏洞。保持闭源或许有充分的理由，但本项目持相反立场。
+Zygisk 宿主以 root 权限运行在每个应用进程里，因此它的代码必须可被审计。VexZygisk 是一个独立、开源的实现：注入、挂载处理和模块加载路径都在本仓库中，而不是放在一个闭源的配套组件里。
 
 ## 优势
 
 - 永久开源（FOSS）
-- 支持 Zygisk Next 模块，含 companion 与 `pltHook` 契约
+- ELF 符号查找与 GOT 遍历由一个精简的 `no_std` Rust 核心完成，设备侧路径不做任何分配
 - 支持 KernelSU **与** APatch，并提供专用构建
 - 黑名单通过在被隐藏的进程自身中回滚挂载来处理，并以缓存好的干净命名空间作为回退
 - 连回滚够不到的痕迹也一并隐藏：被隐藏进程里仍映射着的模块库，以及 bionic 留在那个静态缓冲里的挂载行
@@ -52,7 +50,7 @@ Zygisk Next 的开发者们在 Android 社区中广为人知且值得信任，�
 
 两种模式都够不到全部。有两处痕迹留在被隐藏的进程内部，而且都要等模块跑完才定型：
 
-- 仍映射在其中的模块库，每一个都在 `/proc/self/maps` 里写着自身对应的文件。这些映射会被替换成同样字节、同一地址的匿名副本，库因此仍从原处继续运行，而名字消失了——Zygisk Next 的库也一样，加载器是以 memfd 把它们交出去的，任何 `/data` 下的路径都描述不了。
+- 仍映射在其中的模块库，每一个都在 `/proc/self/maps` 里写着自身对应的文件。这些映射会被替换成同样字节、同一地址的匿名副本，库因此仍从原处继续运行，而名字消失了。
 - 被 bionic 解析进单个静态缓冲的那一行挂载。zygote 在仍带着模块挂载时读入它，此后 fork 出的每个应用都会继承，因此挂载树已被清理的进程仍能从自己的 libc 里读出这些痕迹。在挂载树已经干净的时候解析一次挂载表，就能替换掉它的内容。
 
 在模块旁放置一个标记文件即可让所有进程都走命名空间方式，无需重新编译：
@@ -70,15 +68,6 @@ KernelSU 可以被注入进一个已经在运行的系统——也就是那些�
 注入本身只在目标**全新** fork+exec 时才会发生，因此起步太晚的 monitor 用不了那个从真正开机起就一直跑着的 zygote：所有注入入口等的都是它早已走完的启动步骤。monitor 改为把它重启（respawn）——杀掉一次，由把它当服务管理的 init 拉起新的进程，再交给正常的 fork 路径注入。由于 zygote 是 system_server 的父进程，这一步正是 late-load 用户原本要手动在管理器里点一次「软重启」的那个动作，框架恢复时开机动画会重播一次。正常开机时 monitor 早于该进程存在，因此扫描什么也扫不到，不会改变任何行为。
 
 只有 KernelSU 版会装这个。APatch 没有对应阶段，因此 APatch 包是删除已有的副本，而不是安装一份。
-
-## 对 Zygisk Next 的支持
-
-VexZygisk 实现了 Zygisk Next API，因此针对它编写的模块——其中包括较新的 LSPosed 构建——都能通过它加载。
-
-- 模块通过 `zn_modules.txt` 列出，支持按目标解析与可选的 companion。companion 由守护进程 fork 而来，因此它保留的是守护进程的特权 SELinux 域，而不是加载该模块的进程所属的受限域。
-- 模块库以 memfd 形式交付，而不是模块文件本身的描述符，因此非特权目标无需改动模块文件自身的模式与 SELinux 标签即可加载它们。
-- Zygisk 与 Zygisk Next 模块可并存：一个模块可以同时提供 `zygisk/<arch>.so` 与 `zn_modules.txt`（LSPosed 就是如此），二者各走自己的路径，互不排斥。
-- 模块拿到的是**当前这一版** Zygisk Next API：声明版本 3 或 4 的模块会加载，声明其他版本的会被拒绝，而不是拿到一张自它构建以来字段已经挪位的表。
 
 ## 依赖
 
@@ -162,8 +151,6 @@ make ROOT_IMPL=apatch release  # explicit form
 本仓库建立在其他项目的工作之上，下面的列表说明了各部分与其来源的对应关系。
 
 * [ReZygisk](https://github.com/PerformanC/ReZygisk)：本仓库所 fork 并用 C 重写的上游项目
-* [ZygiskNext](https://github.com/Dr-TSNG/ZygiskNext)：Zygisk Next 模块架构的最初设计，以及 VexZygisk 实现的那套 API
-* [ZygiskNextNext](https://github.com/VeryBaaad/ZygiskNextNext)：独立 Zygisk Next API 的参考实现
 * [Magisk](https://github.com/topjohnwu/Magisk)：现代 Android Root 与 Zygisk 本身的基石
 * [OnyxZygisk](https://github.com/OnyxZygisk/OnyxZygisk)：仅回滚的挂载模型——痕迹选择逻辑，以及被隐藏进程在自身挂载树副本上执行的就地回滚
 * [KernelSU](https://github.com/tiann/KernelSU)：KernelSU 版所通信的内核接口

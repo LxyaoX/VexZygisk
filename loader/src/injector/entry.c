@@ -6,7 +6,6 @@
 
 #include "hook.h"
 #include "ptrace_clear.h"
-#include "zn_loader.h"
 
 __attribute__((visibility("default")))
 void entry(void *handle, void *addr, size_t size) {
@@ -23,10 +22,6 @@ void entry(void *handle, void *addr, size_t size) {
   LOGD("start plt hooking");
 
   hook_functions();
-
-  /* One window for every target: the zygote's apps ask again for themselves, so
-     what it can lose is only the modules naming the zygote itself. */
-  zn_load_all_modules(ZN_PLAN_ATTEMPTS_TREE, REZYGISKD_RETRY_DELAY_US);
 
   struct kernel_version version = parse_kversion();
   if (version.major > 3 || (version.major == 3 && version.minor >= 8)) {

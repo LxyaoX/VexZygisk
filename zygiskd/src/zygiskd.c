@@ -1,4 +1,3 @@
-#include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,12 +17,9 @@
 #include <unistd.h>
 
 #include "constants.h"
-#include "zn_status.h"
 #include "zygisk_paths.h"
-#include "zn_targets.h"
 #include "root_impl/common.h"
 #include "utils.h"
-#include "vexcore.h"
 
 /* INFO: The flag naming the root solution this daemon was built for. Only the
          corresponding bit is ever set; the loader matches on whichever root
@@ -40,50 +36,10 @@ struct Module {
   int companion;
 };
 
-/* INFO: Zygisk Next modules ship zn_modules.txt instead of a Zygisk library,
-         they are kept apart so the loader indexes stay those of the modules it
-         can actually load. The targets and companion flag are read from the
-         file so the controller can surface them in the UI. */
-struct ZnModule {
-  char *name;
-  bool companion;
-  char **targets;
-  size_t targets_len;
-};
-
 struct Context {
   struct Module *modules;
   size_t len;
-
-  struct ZnModule *zn_modules;
-  size_t zn_len;
-
-  struct ZnCompanion *zn_companions;
-  size_t zn_companions_len;
-
 };
-
-/* INFO: A Zygisk Next library resolved for one target: its path, whether the
-         module asked for a companion, and the fd of the opened file. */
-struct ZnModuleFile {
-  char *lib_path;
-  /* INFO: The module directory the library was resolved from, which is what the
-           module is named by: in the plan the loader hands out, in the log, and
-           in the runtime's report of a specialization. */
-  char *module_id;
-  bool companion;
-  int fd;
-  bool owned;  /* INFO: false when fd is a daemon-cached shared memfd. */
-};
-
-/* INFO: One live Zygisk Next companion process, kept for the daemon's
-         lifetime and handed out by descriptor duplication. Keyed by library
-         path, since ZN companions are per module library, not per request. */
-struct ZnCompanion {
-  char *lib_path;
-  int fd;
-};
-
 
 #define ARCH_STR "arm64-v8a"
 
@@ -169,19 +125,16 @@ static void send_minimal_module_entry(void) {
 
   controller_dgram_put_u8(&dgram, DAEMON_MODULE_ENTRY);
   controller_dgram_put_string(&dgram, "");
-  controller_dgram_put_u8(&dgram, 0);
 
   controller_dgram_send(&dgram);
 }
 
-/* INFO: A standard Zygisk module entry: the type byte tells the monitor the
-           module does not target Zygisk Next. */
+/* INFO: A standard Zygisk module entry. */
 static void send_module_info(const char *name) {
   struct controller_dgram dgram = { .len = 0 };
 
   if (!controller_dgram_put_u8(&dgram, DAEMON_MODULE_ENTRY) ||
-      !controller_dgram_put_string(&dgram, name) ||
-      !controller_dgram_put_u8(&dgram, 0)) {
+      !controller_dgram_put_string(&dgram, name)) {
     LOGE("The module entry for \"%s\" does not fit one datagram", name);
 
     send_minimal_module_entry();
@@ -192,152 +145,13 @@ static void send_module_info(const char *name) {
   controller_dgram_send(&dgram);
 }
 
-/* INFO: Zygisk Next modules also carry the companion flag and every target
-         of their zn_modules.txt, so the monitor can show them. Targets past
-         the buffer are dropped with the count the record actually carries -
-         the entry stays parseable, which a truncated one would not be. */
-static void send_zn_module_info(const struct ZnModule *module) {
-  struct controller_dgram dgram = { .len = 0 };
-
-  if (!controller_dgram_put_u8(&dgram, DAEMON_MODULE_ENTRY) ||
-      !controller_dgram_put_string(&dgram, module->name) ||
-      !controller_dgram_put_u8(&dgram, 1) ||
-      !controller_dgram_put_u8(&dgram, module->companion ? 1 : 0) ||
-      !controller_dgram_put_u32(&dgram, 0)) {
-    LOGE("The Zygisk Next entry for \"%s\" does not fit one datagram", module->name);
-
-    send_minimal_module_entry();
-
-    return;
-  }
-
-  /* INFO: The count field was written as zero above; its position is where
-            the real count goes once the targets that fit are known. */
-  const size_t count_at = dgram.len - sizeof(uint32_t);
-
-  size_t targets_sent = 0;
-  for (size_t i = 0; i < module->targets_len; i++) {
-    struct controller_dgram probe = dgram;
-
-    if (!controller_dgram_put_string(&probe, module->targets[i])) break;
-
-    dgram = probe;
-    targets_sent++;
-  }
-
-  uint32_t sent = (uint32_t)targets_sent;
-  memcpy(&dgram.bytes[count_at], &sent, sizeof(sent));
-
-  controller_dgram_send(&dgram);
-}
-
-/* INFO: Reads zn_modules.txt and collects the targets, one per line ("name="
-         or "path=" as the first token), plus whether any line asks for a
-         companion, which is only matched between the target and the library.
-         The daemon is the only side that parses this file: the loader takes the
-         plan over the protocol. */
-static void parse_zn_module_file(const char *module_dir, struct ZnModule *module) {
-  char zn_path[PATH_MAX];
-  snprintf(zn_path, PATH_MAX, "%s/zn_modules.txt", module_dir);
-
-  FILE *fp = fopen(zn_path, "re");
-  if (fp == NULL) return;
-
-  char *line = NULL;
-  size_t line_capacity = 0;
-  ssize_t length;
-
-  while ((length = getline(&line, &line_capacity, fp)) > 0) {
-    char *tokens[8];
-    size_t token_count = 0;
-
-    const char *cursor = line;
-    while (*cursor != '\0' && token_count < 8) {
-      while (*cursor != '\0' && isspace((unsigned char)*cursor)) cursor++;
-      if (*cursor == '\0') break;
-
-      const char *start = cursor;
-      while (*cursor != '\0' && !isspace((unsigned char)*cursor)) cursor++;
-
-      size_t token_len = (size_t)(cursor - start);
-      tokens[token_count] = malloc(token_len + 1);
-      if (tokens[token_count] == NULL) break;
-      memcpy(tokens[token_count], start, token_len);
-      tokens[token_count][token_len] = '\0';
-
-      token_count++;
-    }
-
-    if (token_count >= 2) {
-      for (size_t i = 1; i + 1 < token_count; i++) {
-        if (strcmp(tokens[i], "companion") == 0) module->companion = true;
-      }
-
-      char **tmp = realloc(module->targets, (module->targets_len + 1) * sizeof(char *));
-      if (tmp != NULL) {
-        module->targets = tmp;
-        module->targets[module->targets_len++] = tokens[0];
-        tokens[0] = NULL; /* INFO: Ownership moves into the array */
-      }
-    }
-
-    for (size_t i = 0; i < token_count; i++) free(tokens[i]);
-  }
-
-  free(line);
-  fclose(fp);
-}
-
-static bool add_zn_module(struct Context *restrict context, const char *name) {
-  struct ZnModule *tmp = realloc(context->zn_modules, (context->zn_len + 1) * sizeof(struct ZnModule));
-  if (tmp == NULL) {
-    LOGE("Failed reallocating memory for Zygisk Next modules.");
-
-    return false;
-  }
-  context->zn_modules = tmp;
-
-  struct ZnModule *module = &context->zn_modules[context->zn_len];
-  module->name = strdup(name);
-  if (module->name == NULL) {
-    LOGE("Failed to strdup for the Zygisk Next module \"%s\": %s", name, strerror(errno));
-
-    /* INFO: The name is freed here because free_modules only walks the
-              entries zn_len counts, and this one was never counted - leaving
-              it behind leaks one strdup per failure for the daemon's life. */
-    free(module->name);
-    module->name = NULL;
-
-    return false;
-  }
-
-  module->companion = false;
-  module->targets = NULL;
-  module->targets_len = 0;
-
-  char module_dir[PATH_MAX];
-  module_dir_path(module_dir, PATH_MAX, name);
-
-  parse_zn_module_file(module_dir, module);
-
-  context->zn_len++;
-
-  return true;
-}
-
 /* INFO: Declared here because load_modules bails out through it, and it is
          defined further down where the rest of the context handling lives. */
 static void free_modules(struct Context *restrict context);
 
-/* INFO: Same story: the Zygisk Next parse cache lives with the request
-         handlers further down, and free_modules drops it on every reload. */
-static void zn_parse_cache_clear(void);
-
 static void load_modules(struct Context *restrict context) {
   context->len = 0;
   context->modules = NULL;
-  context->zn_len = 0;
-  context->zn_modules = NULL;
 
   DIR *dir = opendir(ZYGISK_MODULES_DIR);
   if (dir == NULL) {
@@ -362,26 +176,6 @@ static void load_modules(struct Context *restrict context) {
     module_file_path(disabled, PATH_MAX, name, "disable");
 
     if (access(disabled, F_OK) == 0) continue;
-
-    char zn_modules[PATH_MAX];
-    module_file_path(zn_modules, PATH_MAX, name, "zn_modules.txt");
-
-    /* INFO: Both mechanisms serve a module rather than one excluding the other,
-              which is what LSPosed needs: it ships a zn_modules.txt (it wants a
-              ZN-aware provider) but only ever exports zygisk_module_entry.
-              Treating them as exclusive sends it down a ZN path it cannot load
-              and drops it from the standard path it could. Listing it in both
-              costs nothing - the ZN load finds no zn_module and gives up. */
-    if (access(zn_modules, F_OK) == 0) {
-      LOGI("Found Zygisk Next module \"%s\"", name);
-
-      /* INFO: Its failure is reported rather than dropped: the module would
-                otherwise be absent from the list the injector reads, with
-                nothing on this side to say the record was never made. */
-      if (!add_zn_module(context, name)) {
-        LOGE("Failed to record the Zygisk Next module \"%s\"", name);
-      }
-    }
 
     char so_path[PATH_MAX];
     module_lib_path(so_path, PATH_MAX, name);
@@ -426,34 +220,6 @@ static void load_modules(struct Context *restrict context) {
     closedir(dir);
 }
 
-/* INFO: Closing the cached end is not enough to retire a companion: its control
-         socket is handed to every asker, so any process still holding a duplicate
-         keeps the peer alive and the companion would sit in recvmsg long after the
-         daemon let go, only to be joined by a fresh one after the next zygote
-         restart. shutdown() acts on the socket itself rather than on one
-         descriptor, so every holder sees the close at once and the companion
-         exits through its own "control socket closed" path.
-
-         The double fork hands the companion to init, so the daemon cannot and
-         must not waitpid it. */
-static void release_zn_companion_fd(int fd) {
-  if (fd < 0) return;
-
-  shutdown(fd, SHUT_RDWR);
-  close(fd);
-}
-
-static void free_zn_companions(struct Context *restrict context) {
-  for (size_t i = 0; i < context->zn_companions_len; i++) {
-    free(context->zn_companions[i].lib_path);
-    release_zn_companion_fd(context->zn_companions[i].fd);
-  }
-
-  free(context->zn_companions);
-  context->zn_companions = NULL;
-  context->zn_companions_len = 0;
-}
-
 static void free_modules(struct Context *restrict context) {
   for (size_t i = 0; i < context->len; i++) {
     free(context->modules[i].name);
@@ -464,94 +230,6 @@ static void free_modules(struct Context *restrict context) {
   free(context->modules);
   context->modules = NULL;
   context->len = 0;
-
-  for (size_t i = 0; i < context->zn_len; i++) {
-    free(context->zn_modules[i].name);
-
-    for (size_t j = 0; j < context->zn_modules[i].targets_len; j++) {
-      free(context->zn_modules[i].targets[j]);
-    }
-
-    free(context->zn_modules[i].targets);
-  }
-
-  free(context->zn_modules);
-  context->zn_modules = NULL;
-  context->zn_len = 0;
-
-  free_zn_companions(context);
-
-  /* INFO: The parse cache is stat-validated anyway; dropping it here (module
-            reload, daemon exit) just keeps the resident set honest. */
-  zn_parse_cache_clear();
-}
-
-static void free_zn_module_files(struct ZnModuleFile *files, size_t len) {
-  for (size_t i = 0; i < len; i++) {
-    free(files[i].lib_path);
-    free(files[i].module_id);
-    /* INFO: Shared memfds belong to the staging cache and outlive this
-              request on purpose; only per-call copies are ours to close. */
-    if (files[i].owned && files[i].fd >= 0) close(files[i].fd);
-  }
-
-  free(files);
-}
-
-/* INFO: Splits one zn_modules.txt line, which reads
-         "<name=|path=><target> [companion] <library>". The library is always
-         the last token and "companion" may sit anywhere between the target and
-         it, so only that range is scanned for the flag. */
-/* The line parser, forwarded to the Rust half (see vexcore.h).
-
-   It accepts `name=` or `path=` for the target, an optional `companion` between
-   it and the library, and the library last; a relative library path is relative
-   to the module directory. The answers come back in this frame's buffers, so the
-   only allocation left is the caller's own copy. */
-static bool parse_zn_line(const char *module_dir, const char *line, bool *is_name, char **target, bool *companion, char **lib_path) {
-  char target_buf[PATH_MAX];
-  char lib_buf[PATH_MAX];
-
-  if (!vexcore_zn_parse_line(line, module_dir, is_name, companion,
-                             target_buf, sizeof(target_buf),
-                             lib_buf, sizeof(lib_buf))) {
-    return false;
-  }
-
-  char *parsed_target = strdup(target_buf);
-  if (parsed_target == NULL) {
-    LOGE("Failed allocating a Zygisk Next target");
-
-    return false;
-  }
-
-  char *resolved = strdup(lib_buf);
-  if (resolved == NULL) {
-    LOGE("Failed allocating a Zygisk Next library path");
-
-    free(parsed_target);
-
-    return false;
-  }
-
-  *target = parsed_target;
-  *lib_path = resolved;
-
-  return true;
-}
-
-/* Whether one manifest line selects this process. A name target is answered by
-   the executable's own name, with the zygote-class spelling resolved the way
-   zn_targets.h explains; a path target names the executable, which is what
-   /proc/self/exe answers. */
-static bool zn_matches_target(const char *target, bool is_name, const char *process_name, const char *process_path) {
-  if (is_name) {
-    if (zn_target_is_zygote_class(target)) return zn_process_is_zygote_class(process_name);
-
-    return strcmp(process_name, target) == 0;
-  }
-
-  return strcmp(process_path, target) == 0;
 }
 
 /* INFO: Every exchange the daemon takes part in is bound by this, client
@@ -735,643 +413,6 @@ static int spawn_companion(char *restrict argv[], char *restrict name, int lib_f
   return daemon_fd;
 }
 
-/* Spawns the companion of a Zygisk Next module. Takes a path rather than a
-   module name because ZN modules are not tracked by index; the library is
-   copied into a memfd here since the companion cannot read /data/adb/modules. */
-static int spawn_zn_companion(char *restrict argv[], const char *restrict lib_path) {
-  int daemon_fd = -1;
-  if (exec_companion(argv, "zn-companion", "zn-companion", &daemon_fd) == -1) return -1;
-
-  if (write_string(daemon_fd, lib_path) == -1) {
-    LOGE("Failed writing the Zygisk Next library path.");
-
-    close(daemon_fd);
-
-    return -1;
-  }
-
-  bool shared = false;
-  int lib_fd = create_library_fd(lib_path, &shared);
-  if (lib_fd == -1) {
-    LOGE("Failed handing over \"%s\"", lib_path);
-
-    close(daemon_fd);
-
-    return -1;
-  }
-
-  if (write_fd(daemon_fd, lib_fd) == -1) {
-    LOGE("Failed sending the Zygisk Next library fd.");
-
-    if (!shared) close(lib_fd);
-
-    close(daemon_fd);
-
-    return -1;
-  }
-
-  if (!shared) close(lib_fd);
-
-  uint8_t response = 0;
-  if (read_uint8_t(daemon_fd, &response) <= 0) {
-    LOGE("Failed reading the Zygisk Next companion response.");
-
-    close(daemon_fd);
-
-    return -1;
-  }
-
-  if (response != 1) {
-    LOGE("The Zygisk Next companion rejected \"%s\"", lib_path);
-
-    close(daemon_fd);
-
-    return -1;
-  }
-
-  return daemon_fd;
-}
-
-/* Walks every Zygisk Next module and resolves the libraries targeting this
-   process. The daemon opens the files itself because a non-root target cannot
-   read /data/adb/modules, which is the whole point of handing them over as
-   file descriptors. */
-/* INFO: Parsed zn_modules.txt of one module directory, cached because
-         collect_zn_modules walks every module for every fork. Re-parsed when
-         the file's stat identity changes, which is how a module update takes
-         effect; the disable marker stays a per-request check, which is what
-         makes toggling a module work without a daemon restart. */
-struct zn_cached_line {
-  bool is_name;
-  bool companion;
-  char *target;
-  char *lib_path;
-};
-
-struct zn_cached_module {
-  char *dir_name;
-  struct stat st;
-  bool valid;
-
-  struct zn_cached_line *lines;
-  size_t lines_len;
-};
-
-static struct zn_cached_module *zn_parse_cache;
-static size_t zn_parse_cache_len;
-
-/* INFO: The /data/adb/modules listing, cached against the directory's stat
-         identity: entries appear or disappear through the directory itself,
-         so its mtime covers module installs and removals. Everything inside
-         a module directory (disable marker, zn_modules.txt identity) stays a
-         per-request check on purpose. */
-struct zn_dir_entry {
-  char *name;
-};
-
-static struct zn_dir_entry *zn_dir_cache;
-static size_t zn_dir_cache_len;
-static struct stat zn_dir_st;
-static bool zn_dir_valid;
-
-/* INFO: A module names its library as a relative path or as an absolute one,
-         so nothing stops a zn_modules.txt from pointing at another module's
-         directory or at a system file. Only a library that really lives inside
-         its own module directory is accepted, which is also what makes the
-         per-module disable and remove switches mean anything. `resolved`
-         receives the canonical path, so every path this daemon hands out later
-         is one that can be compared as a string. */
-static bool zn_library_in_module_dir(const char *module_dir, const char *lib_path, char *resolved, size_t resolved_size) {
-  char real_dir[PATH_MAX];
-  if (realpath(module_dir, real_dir) == NULL) return false;
-
-  char real_lib[PATH_MAX];
-  if (realpath(lib_path, real_lib) == NULL) return false;
-
-  size_t dir_len = strlen(real_dir);
-  size_t lib_len = strlen(real_lib);
-
-  /* INFO: The separator is required as well: "/data/adb/modules/foo" must not
-            accept "/data/adb/modules/foobar/lib.so". */
-  if (lib_len <= dir_len) return false;
-  if (strncmp(real_lib, real_dir, dir_len) != 0) return false;
-  if (real_lib[dir_len] != '/') return false;
-
-  if (lib_len >= resolved_size) return false;
-
-  memcpy(resolved, real_lib, lib_len + 1);
-
-  return true;
-}
-
-/* A Zygisk Next library is loaded by the target process itself, so one built for
-   the other bitness can never work there. Shipping both and listing both is how
-   modules are normally packaged, so skipping it here keeps a guaranteed-failing
-   dlopen out of every target.
-
-   Twenty header bytes rather than five: a matching class says nothing about the
-   rest, and an ELF of the right width built for another machine is refused here,
-   where the reason is known. */
-static bool zn_library_matches_abi(const char *path) {
-  int fd = open(path, O_RDONLY | O_CLOEXEC);
-  if (fd == -1) return false;
-
-  unsigned char header[20];
-  size_t filled = 0;
-
-  while (filled < sizeof(header)) {
-    ssize_t got = read(fd, header + filled, sizeof(header) - filled);
-    if (got == -1) {
-      if (errno == EINTR) continue;
-
-      break;
-    }
-
-    if (got == 0) break;
-
-    filled += (size_t)got;
-  }
-
-  close(fd);
-
-  if (filled < sizeof(header)) return false;
-  if (memcmp(header, ELFMAG, SELFMAG) != 0) return false;
-  if (header[EI_DATA] != ELFDATA2LSB) return false;
-
-#if defined(__LP64__)
-  if (header[EI_CLASS] != ELFCLASS64) return false;
-#else
-  if (header[EI_CLASS] != ELFCLASS32) return false;
-#endif
-
-  uint16_t type = 0;
-  uint16_t machine = 0;
-
-  memcpy(&type, header + 16, sizeof(type));
-  memcpy(&machine, header + 18, sizeof(machine));
-
-  /* INFO: ET_DYN rather than either executable type: what is handed over is
-            loaded, not run, so the relocatable form is the only one that can
-            work. */
-  if (type != ET_DYN) return false;
-
-#if defined(__aarch64__)
-  return machine == EM_AARCH64;
-#elif defined(__arm__)
-  return machine == EM_ARM;
-#elif defined(__x86_64__)
-  return machine == EM_X86_64;
-#elif defined(__i386__)
-  return machine == EM_386;
-#else
-  return false;
-#endif
-}
-
-static void zn_parse_cache_free_lines(struct zn_cached_module *module) {
-  for (size_t i = 0; i < module->lines_len; i++) {
-    free(module->lines[i].target);
-    free(module->lines[i].lib_path);
-  }
-
-  free(module->lines);
-  module->lines = NULL;
-  module->lines_len = 0;
-  module->valid = false;
-}
-
-static void zn_parse_cache_clear(void) {
-  for (size_t i = 0; i < zn_parse_cache_len; i++) {
-    zn_parse_cache_free_lines(&zn_parse_cache[i]);
-    free(zn_parse_cache[i].dir_name);
-  }
-
-  free(zn_parse_cache);
-  zn_parse_cache = NULL;
-  zn_parse_cache_len = 0;
-
-  for (size_t i = 0; i < zn_dir_cache_len; i++) {
-    free(zn_dir_cache[i].name);
-  }
-
-  free(zn_dir_cache);
-  zn_dir_cache = NULL;
-  zn_dir_cache_len = 0;
-  zn_dir_valid = false;
-}
-
-/* INFO: The cache slot for `dir_name`, created and registered when there is
-         none yet. NULL only when the table could not grow or the name could not
-         be copied. */
-static struct zn_cached_module *zn_parse_cache_slot(const char *dir_name) {
-  for (size_t i = 0; i < zn_parse_cache_len; i++) {
-    if (strcmp(zn_parse_cache[i].dir_name, dir_name) == 0) return &zn_parse_cache[i];
-  }
-
-  struct zn_cached_module *tmp = realloc(zn_parse_cache, (zn_parse_cache_len + 1) * sizeof(struct zn_cached_module));
-  if (tmp == NULL) {
-    LOGE("Failed growing the Zygisk Next parse cache");
-
-    return NULL;
-  }
-
-  zn_parse_cache = tmp;
-
-  struct zn_cached_module *module = &zn_parse_cache[zn_parse_cache_len];
-  memset(module, 0, sizeof(*module));
-
-  module->dir_name = strdup(dir_name);
-  if (module->dir_name == NULL) return NULL;
-
-  zn_parse_cache_len++;
-
-  return module;
-}
-
-/* INFO: Reads `zn_file` into `module`, replacing whatever rows it held.
-         Returns false when the file could not be opened, which leaves the slot
-         invalid so the next call tries again.
-
-         Everything that costs a syscall runs here, once per file change, and
-         not wherever the rows are consumed: realpath() stats every path
-         component and the ABI check opens the file, while the rows are walked
-         for every module on every fork. What gets cached is the canonical path,
-         so the per-fork path stays a plain string compare. */
-static bool zn_parse_cache_read(struct zn_cached_module *module,
-                                const char *module_dir, const char *zn_file) {
-  FILE *fp = fopen(zn_file, "re");
-  if (fp == NULL) return false;
-
-  char *line = NULL;
-  size_t line_capacity = 0;
-  ssize_t length;
-
-  while ((length = getline(&line, &line_capacity, fp)) > 0) {
-    while (length > 0 && isspace((unsigned char)line[length - 1])) line[--length] = '\0';
-    if (length == 0) continue;
-
-    bool is_name = false;
-    bool companion = false;
-    char *target = NULL;
-    char *lib_path = NULL;
-
-    if (!parse_zn_line(module_dir, line, &is_name, &target, &companion, &lib_path)) continue;
-
-    char canonical[PATH_MAX];
-
-    if (!zn_library_in_module_dir(module_dir, lib_path, canonical, sizeof(canonical))) {
-      LOGW("The Zygisk Next library \"%s\" of \"%s\" cannot be resolved inside its module directory, skipping", lib_path, module->dir_name);
-
-      free(target);
-      free(lib_path);
-
-      continue;
-    }
-
-    free(lib_path);
-
-    lib_path = strdup(canonical);
-
-    if (lib_path == NULL) {
-      LOGE("Failed copying the canonical path of \"%s\"", canonical);
-
-      free(target);
-
-      continue;
-    }
-
-    if (!zn_library_matches_abi(lib_path)) {
-      LOGD("The Zygisk Next library \"%s\" is not built for this ABI, skipping", lib_path);
-
-      free(target);
-      free(lib_path);
-
-      continue;
-    }
-
-    struct zn_cached_line *tmp = realloc(module->lines, (module->lines_len + 1) * sizeof(struct zn_cached_line));
-    if (tmp == NULL) {
-      LOGE("Failed growing the parsed rows of \"%s\"", module->dir_name);
-
-      free(target);
-      free(lib_path);
-
-      break;
-    }
-
-    module->lines = tmp;
-    module->lines[module->lines_len].is_name = is_name;
-    module->lines[module->lines_len].companion = companion;
-    module->lines[module->lines_len].target = target;
-    module->lines[module->lines_len].lib_path = lib_path;
-    module->lines_len++;
-  }
-
-  free(line);
-  fclose(fp);
-
-  return true;
-}
-
-/* INFO: The parsed rows of `dir_name`, from the cache when the file has not
-         changed since it was read. What is left here is the decision about the
-         file - gone, unchanged, or new - since the reading and the slot
-         bookkeeping are their own steps. */
-static struct zn_cached_module *zn_parse_cache_get(const char *dir_name, const char *module_dir, const char *zn_file) {
-  struct zn_cached_module *module = zn_parse_cache_slot(dir_name);
-  if (module == NULL) return NULL;
-
-  struct stat st;
-  if (stat(zn_file, &st) == -1) {
-    if (module->valid) {
-      LOGI("The Zygisk Next list of \"%s\" disappeared", dir_name);
-
-      zn_parse_cache_free_lines(module);
-    }
-
-    return NULL;
-  }
-
-  if (module->valid && stat_identity_same(&module->st, &st)) return module;
-
-  /* INFO: New or changed file: drop the old rows and parse afresh. */
-  zn_parse_cache_free_lines(module);
-
-  if (!zn_parse_cache_read(module, module_dir, zn_file)) return NULL;
-
-  module->st = st;
-  module->valid = true;
-
-  return module;
-}
-
-/* INFO: How many libraries one process's plan is deduplicated against. A plan
-         is a handful of entries; this only exists so the per-fork path cannot
-         grow an allocation. Past the cap a duplicate slips through to the
-         loader's own already-loaded check, which is cheaper than the growth
-         would be. */
-#define ZN_PLAN_DEDUP_MAX 32
-
-/* INFO: The identity a library is deduplicated by: the file, not the name it
-         was reached through. Two names can be one file - a hard link, a second
-         module directory holding another link to the same library - and what
-         matters is that it is loaded once, because loading it twice installs
-         its hooks twice. The canonical path is the cheap answer and this is the
-         exact one; the stat is taken on the path that already matched, once per
-         matched row and not once per fork. */
-struct zn_served_library {
-  dev_t dev;
-  ino_t inode;
-};
-
-/* INFO: The listing of the module directory, rebuilt in place when the
-         directory is gone from the table or its identity changed; otherwise it
-         stays as it is. Kept across calls because it is read on every fork. */
-static int compare_zn_dir_entries(const void *left, const void *right) {
-  const struct zn_dir_entry *a = (const struct zn_dir_entry *)left;
-  const struct zn_dir_entry *b = (const struct zn_dir_entry *)right;
-
-  return strcmp(a->name, b->name);
-}
-static bool refresh_module_dir_cache(const struct stat *dir_st) {
-  if (zn_dir_valid && stat_identity_same(dir_st, &zn_dir_st)) return true;
-
-  for (size_t i = 0; i < zn_dir_cache_len; i++) {
-    free(zn_dir_cache[i].name);
-  }
-
-  zn_dir_cache_len = 0;
-
-  DIR *dir = opendir(ZYGISK_MODULES_DIR);
-  if (dir == NULL) {
-    LOGE("Failed opening %s: %s", ZYGISK_MODULES_DIR, strerror(errno));
-
-    zn_dir_valid = false;
-
-    return false;
-  }
-
-  struct dirent *entry;
-  while ((entry = readdir(dir)) != NULL) {
-    if (entry->d_type != DT_DIR && entry->d_type != DT_UNKNOWN) continue;
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 || strcmp(entry->d_name, "rezygisk") == 0) continue;
-
-    struct zn_dir_entry *tmp = realloc(zn_dir_cache, (zn_dir_cache_len + 1) * sizeof(struct zn_dir_entry));
-    if (tmp == NULL) {
-      LOGE("Failed growing the module directory listing");
-
-      break;
-    }
-
-    zn_dir_cache = tmp;
-    zn_dir_cache[zn_dir_cache_len].name = strdup(entry->d_name);
-    if (zn_dir_cache[zn_dir_cache_len].name == NULL) break;
-
-    zn_dir_cache_len++;
-  }
-
-  closedir(dir);
-
-  /* INFO: Sorted, so what a process is served does not depend on the order the
-             directory hands its entries back: two modules that both name the
-             same process are listed by name, the slots the loader indexes them
-             by are the same on every boot, and a report names the module it is
-             about whichever way the filesystem felt that day. */
-  if (zn_dir_cache_len > 1) {
-    qsort(zn_dir_cache, zn_dir_cache_len, sizeof(struct zn_dir_entry), compare_zn_dir_entries);
-  }
-
-  zn_dir_st = *dir_st;
-  zn_dir_valid = true;
-
-  return true;
-}
-
-static bool collect_zn_modules(const char *process_name, const char *process_path, struct ZnModuleFile **out, size_t *out_len) {
-  *out = NULL;
-  *out_len = 0;
-
-  size_t capacity = 0;
-
-  /* INFO: Two modules may list the same library, and loading it twice would
-           install its hooks twice. The identity is the file's rather than the
-           path's: a hard link keeps two names for one file, and the second one
-           is a library that must not be loaded a second time. */
-  struct zn_served_library served[ZN_PLAN_DEDUP_MAX];
-  size_t served_len = 0;
-
-  /* INFO: What "why did this process get nothing" needs, and the only place
-           that can answer it: how many module directories were walked, how many
-           of them held a list at all, how many rows those lists had, and how
-           many of those named this process. An empty plan looks the same from
-           the loader whichever of those went wrong, and every one of them has
-           been mistaken for one of the others while this was being chased. */
-  size_t dirs_walked = 0;
-  size_t lists_valid = 0;
-  size_t rows_examined = 0;
-  size_t rows_matched = 0;
-
-  /* INFO: The first row that did not name this process, kept only to be shown
-            when nothing did: it is what a reader compares against the name the
-            process reported, and that comparison is the whole diagnosis. */
-  const char *example_target = NULL;
-
-  struct stat dir_st;
-  if (stat(ZYGISK_MODULES_DIR, &dir_st) == -1) {
-    LOGE("Failed stating %s: %s", ZYGISK_MODULES_DIR, strerror(errno));
-
-    return false;
-  }
-
-  if (!refresh_module_dir_cache(&dir_st)) return false;
-
-  for (size_t i = 0; i < zn_dir_cache_len; i++) {
-    const char *entry_name = zn_dir_cache[i].name;
-
-    dirs_walked++;
-
-    char module_dir[PATH_MAX];
-    module_dir_path(module_dir, PATH_MAX, entry_name);
-
-    char disabled[PATH_MAX];
-    module_file_path(disabled, PATH_MAX, entry_name, "disable");
-
-    if (access(disabled, F_OK) == 0) continue;
-
-    /* INFO: A module marked for removal is on its way out at the next reboot;
-              handing its libraries to new processes until then is not wanted,
-              and the standard module path already treats "remove" this way. */
-    char removed[PATH_MAX];
-    module_file_path(removed, PATH_MAX, entry_name, "remove");
-
-    if (access(removed, F_OK) == 0) continue;
-
-    char zn_file[PATH_MAX];
-    module_file_path(zn_file, PATH_MAX, entry_name, "zn_modules.txt");
-
-    /* INFO: No access() probe here: zn_parse_cache_get stats the file and
-              fopen fails the same way when it exists but is unreadable, so
-              the extra syscall per module per fork bought nothing. */
-    struct zn_cached_module *cached = zn_parse_cache_get(entry_name, module_dir, zn_file);
-    if (cached == NULL || !cached->valid) continue;
-
-    lists_valid++;
-
-    for (size_t row = 0; row < cached->lines_len; row++) {
-      struct zn_cached_line *line = &cached->lines[row];
-
-      rows_examined++;
-
-      if (!zn_matches_target(line->target, line->is_name, process_name, process_path)) {
-        if (example_target == NULL) example_target = line->target;
-
-        continue;
-      }
-
-      rows_matched++;
-
-      /* INFO: Stated before anything is built for it, so a library that turns
-                out to be a duplicate costs one stat rather than a copy of
-                itself. */
-      struct stat library_st;
-      if (stat(line->lib_path, &library_st) == -1) {
-        LOGE("Failed stating the Zygisk Next library \"%s\"", line->lib_path);
-
-        continue;
-      }
-
-      bool already_served = false;
-
-      for (size_t seen = 0; seen < served_len; seen++) {
-        if (served[seen].dev == library_st.st_dev && served[seen].inode == library_st.st_ino) {
-          already_served = true;
-
-          break;
-        }
-      }
-
-      if (already_served) continue;
-
-      bool shared = false;
-      int fd = create_library_fd(line->lib_path, &shared);
-      if (fd == -1) {
-        LOGE("Failed handing over the Zygisk Next library \"%s\"", line->lib_path);
-
-        continue;
-      }
-
-      if (*out_len == capacity) {
-        size_t new_capacity = capacity == 0 ? 8 : capacity * 2;
-
-        struct ZnModuleFile *tmp = realloc(*out, new_capacity * sizeof(struct ZnModuleFile));
-        if (tmp == NULL) {
-          LOGE("Failed growing the Zygisk Next module list");
-
-          if (!shared) close(fd);
-
-          break;
-        }
-
-        *out = tmp;
-        capacity = new_capacity;
-      }
-
-      char *lib_path_copy = strdup(line->lib_path);
-      if (lib_path_copy == NULL) {
-        LOGE("Failed copying the Zygisk Next library path \"%s\"", line->lib_path);
-
-        if (!shared) close(fd);
-
-        continue;
-      }
-
-      char *module_id_copy = strdup(entry_name);
-      if (module_id_copy == NULL) {
-        LOGE("Failed copying the Zygisk Next module id \"%s\"", entry_name);
-
-        free(lib_path_copy);
-
-        if (!shared) close(fd);
-
-        continue;
-      }
-
-      (*out)[*out_len].lib_path = lib_path_copy;
-      (*out)[*out_len].module_id = module_id_copy;
-      (*out)[*out_len].companion = line->companion;
-      (*out)[*out_len].fd = fd;
-      (*out)[*out_len].owned = !shared;
-      (*out_len)++;
-
-      if (served_len < ZN_PLAN_DEDUP_MAX) {
-        served[served_len].dev = library_st.st_dev;
-        served[served_len].inode = library_st.st_ino;
-        served_len++;
-      }
-    }
-  }
-
-  /* INFO: One line, and only when the object it describes is empty and there
-           was something that could have filled it: a process no manifest names
-           is the common case and this runs on every fork, while an empty plan
-           that had material behind it is the one worth reading. The counters are
-           read by the condition and not only by the log line on purpose - a
-           release build compiles every LOG* out entirely, which would leave them
-           set but unused, and -Werror is on. */
-  if (*out_len == 0 && rows_matched == 0 && dirs_walked > 0 && lists_valid > 0 && rows_examined > 0) {
-    LOGW("Zygisk Next: no library for \"%s\" - nothing of %zu row(s) in %zu list(s) named it, %zu dir(s) walked",
-         process_name, rows_examined, lists_valid, dirs_walked);
-  }
-
-  /* INFO: Written for the same reason the line above is logged, and for the
-            case the log cannot reach: a release build has no log at all. */
-  if (zn_process_is_zygote_class(process_name)) {
-    zn_status_record(process_name, dirs_walked, lists_valid, rows_examined, rows_matched, example_target);
-  }
-
-  return true;
-}
-
 static int create_daemon_socket(void) {
   set_socket_create_context("u:r:zygote:s0");
 
@@ -1391,7 +432,7 @@ static void send_daemon_info(const struct Context *restrict context) {
   /* INFO: The count has to match what is actually sent below: tombstoned
             slots carry no name and are not announced, so the live module
             entries are counted first. */
-  uint32_t modules_len = (uint32_t)context->zn_len;
+  uint32_t modules_len = 0;
   for (size_t i = 0; i < context->len; i++) {
     if (context->modules[i].name != NULL) modules_len++;
   }
@@ -1417,10 +458,6 @@ static void send_daemon_info(const struct Context *restrict context) {
 
     send_module_info(context->modules[i].name);
   }
-
-  for (size_t i = 0; i < context->zn_len; i++) {
-    send_zn_module_info(&context->zn_modules[i]);
-  }
 }
 
 /* INFO: The ceiling of the reload snapshot: more modules than this are
@@ -1434,8 +471,7 @@ static void send_daemon_info(const struct Context *restrict context) {
    is what the RemoveModule tombstone exists for; a rebuild-from-scratch threw
    that away. So the reload merges: gone modules are tombstoned where they sit,
    kept ones are refreshed (their library descriptor re-opened), new ones
-   appended. The Zygisk Next list is rebuilt freely - it is keyed by name on both
-   sides. */
+   appended. */
 static void reload_modules(struct Context *restrict context) {
   /* INFO: The directory is read into a snapshot first, so that "is this
             module still on disk" is answered against one instant of it. */
@@ -1538,51 +574,6 @@ static void reload_modules(struct Context *restrict context) {
     context->len++;
   }
 
-  /* INFO: The Zygisk Next list is name-keyed on both sides of the protocol,
-            so it is rebuilt the plain way - out with the old, in with what
-            load_modules finds, companions released with it. */
-  for (size_t i = 0; i < context->zn_len; i++) {
-    free(context->zn_modules[i].name);
-
-    for (size_t j = 0; j < context->zn_modules[i].targets_len; j++) {
-      free(context->zn_modules[i].targets[j]);
-    }
-
-    free(context->zn_modules[i].targets);
-  }
-
-  free(context->zn_modules);
-  context->zn_modules = NULL;
-  context->zn_len = 0;
-
-  free_zn_companions(context);
-  zn_parse_cache_clear();
-
-  DIR *zn_dir = opendir(ZYGISK_MODULES_DIR);
-  if (zn_dir == NULL) {
-    LOGE("Failed opening modules directory: %s.", ZYGISK_MODULES_DIR);
-
-    send_daemon_info(context);
-
-    return;
-  }
-
-  struct dirent *entry;
-  while ((entry = readdir(zn_dir)) != NULL) {
-    if (entry->d_type != DT_DIR && entry->d_type != DT_UNKNOWN) continue;
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 || strcmp(entry->d_name, "rezygisk") == 0) continue;
-
-    char zn_modules[PATH_MAX];
-    module_file_path(zn_modules, PATH_MAX, entry->d_name, "zn_modules.txt");
-    if (access(zn_modules, F_OK) != 0) continue;
-
-    if (!add_zn_module(context, entry->d_name)) {
-      LOGE("Failed to record the Zygisk Next module \"%s\"", entry->d_name);
-    }
-  }
-
-  closedir(zn_dir);
-
   send_daemon_info(context);
 }
 
@@ -1682,15 +673,6 @@ static void handle_get_process_flags(struct Client *client) {
     LOGW("Could not tell whether uid %u is the manager; leaving it unclassified.", uid);
   }
 
-  /* INFO: The Zygisk Next set only changes on a module load or reload, so
-            the load-time answer rides along for free; the loader remembers
-            it and skips its per-fork ReadZnModules when there is nothing to
-            resolve. A module installed while the daemon runs is picked up on
-            the next reload - flashing a module comes with a reboot anyway. */
-  if (client->context->zn_len > 0) {
-    flags |= PROCESS_ZN_PRESENT;
-  }
-
   flags |= PROCESS_ROOT_IS_ACTIVE;
 
   ret = write_uint32_t(client->fd, flags);
@@ -1760,180 +742,6 @@ static void handle_read_modules(struct Client *client) {
       return;
     }
   }
-}
-
-static void handle_spawn_zn_companion(struct Client *client) {
-  char lib_path[PATH_MAX];
-  ssize_t ret = read_string(client->fd, lib_path, sizeof(lib_path));
-  if (ret <= 0) {
-    LOGE("Failed reading the Zygisk Next library path.");
-
-    return;
-  }
-
-  /* INFO: One companion per library instead of one per request: the process
-             and its dlopened library are kept for the daemon's lifetime, a
-             restarted zygote or a newly forked app reuses it, and the
-             per-process fork storm of the per-request model disappears. A
-             dead companion is detected here and respawned on demand. */
-  for (size_t i = 0; i < client->context->zn_companions_len; i++) {
-    struct ZnCompanion *companion = &client->context->zn_companions[i];
-
-    if (strcmp(companion->lib_path, lib_path) != 0) continue;
-
-    if (check_unix_socket(companion->fd, false)) {
-      LOGD("Reusing the Zygisk Next companion of \"%s\"", lib_path);
-
-      ret = write_uint8_t(client->fd, (uint8_t)1);
-      ASSURE_SIZE_WRITE("SpawnZnCompanion", "response", ret, sizeof(uint8_t), return);
-
-      if (write_fd(client->fd, companion->fd) == -1) LOGE("Failed sending the Zygisk Next companion fd.");
-
-      return;
-    }
-
-    LOGI("The Zygisk Next companion of \"%s\" is gone, respawning", lib_path);
-
-    release_zn_companion_fd(companion->fd);
-    free(companion->lib_path);
-
-    memmove(&client->context->zn_companions[i], &client->context->zn_companions[i + 1],
-            (client->context->zn_companions_len - i - 1) * sizeof(struct ZnCompanion));
-    client->context->zn_companions_len--;
-
-    break;
-  }
-
-  int companion_fd = spawn_zn_companion(client->argv, lib_path);
-  if (companion_fd < 0) {
-    LOGE("Failed spawning the Zygisk Next companion of \"%s\"", lib_path);
-
-    ret = write_uint8_t(client->fd, (uint8_t)0);
-    ASSURE_SIZE_WRITE("SpawnZnCompanion", "response", ret, sizeof(uint8_t), return);
-
-    return;
-  }
-
-  LOGI("Spawned the Zygisk Next companion of \"%s\"", lib_path);
-
-  /* INFO: The socket belongs to the context from here on; serving this
-             client only duplicates it. If the bookkeeping cannot keep up,
-             the healthy companion still serves this one client untracked. */
-  struct ZnCompanion *tmp = realloc(client->context->zn_companions,
-                                    (client->context->zn_companions_len + 1) * sizeof(struct ZnCompanion));
-  if (tmp == NULL) {
-    LOGW("Failed tracking the Zygisk Next companion of \"%s\"", lib_path);
-
-    ret = write_uint8_t(client->fd, (uint8_t)1);
-    ASSURE_SIZE_WRITE("SpawnZnCompanion", "response", ret, sizeof(uint8_t), return);
-
-    if (write_fd(client->fd, companion_fd) == -1) LOGE("Failed sending the Zygisk Next companion fd.");
-
-    close(companion_fd);
-
-    return;
-  }
-
-  /* INFO: The block may have moved, so the context takes the new pointer before
-            anything below can fail. Leaving it on the old one after a later
-            failure would hand the next request a pointer realloc has already
-            freed - the loop at the top of this function and free_zn_companions()
-            both walk that array. */
-  client->context->zn_companions = tmp;
-
-  char *lib_path_copy = strdup(lib_path);
-  if (lib_path_copy == NULL) {
-    LOGW("Failed tracking the Zygisk Next companion of \"%s\"", lib_path);
-
-    ret = write_uint8_t(client->fd, (uint8_t)1);
-    ASSURE_SIZE_WRITE("SpawnZnCompanion", "response", ret, sizeof(uint8_t), return);
-
-    if (write_fd(client->fd, companion_fd) == -1) LOGE("Failed sending the Zygisk Next companion fd.");
-
-    close(companion_fd);
-
-    return;
-  }
-
-  client->context->zn_companions[client->context->zn_companions_len].lib_path = lib_path_copy;
-  client->context->zn_companions[client->context->zn_companions_len].fd = companion_fd;
-  client->context->zn_companions_len++;
-
-  ret = write_uint8_t(client->fd, (uint8_t)1);
-  ASSURE_SIZE_WRITE("SpawnZnCompanion", "response", ret, sizeof(uint8_t), return);
-
-  if (write_fd(client->fd, companion_fd) == -1) LOGE("Failed sending the Zygisk Next companion fd.");
-}
-
-static void handle_read_zn_modules(struct Client *client) {
-  char process_name[PROCESS_NAME_MAX_LEN];
-  ssize_t ret = read_string(client->fd, process_name, sizeof(process_name));
-  if (ret <= 0) {
-    LOGE("Failed reading the process name for ReadZnModules.");
-
-    return;
-  }
-
-  char process_path[PATH_MAX];
-  ret = read_string(client->fd, process_path, sizeof(process_path));
-  if (ret <= 0) {
-    LOGE("Failed reading the process path for ReadZnModules.");
-
-    return;
-  }
-
-  struct ZnModuleFile *files = NULL;
-  size_t files_len = 0;
-
-  if (!collect_zn_modules(process_name, process_path, &files, &files_len)) {
-    ret = write_size_t(client->fd, 0);
-    ASSURE_SIZE_WRITE("ReadZnModules", "len", ret, sizeof(uint32_t), return);
-
-    return;
-  }
-
-  ret = write_size_t(client->fd, files_len);
-  if (ret != (ssize_t)sizeof(uint32_t)) {
-    LOGE("Failed writing the Zygisk Next module count.");
-
-    free_zn_module_files(files, files_len);
-
-    return;
-  }
-
-  LOGD("Serving %zu Zygisk Next module(s) to \"%s\"", files_len, process_name);
-
-  for (size_t i = 0; i < files_len; i++) {
-    if (write_string(client->fd, files[i].lib_path) == -1) {
-      LOGE("Failed writing a Zygisk Next module path.");
-
-      break;
-    }
-
-    /* INFO: The module id follows its library, so the two names of one module
-              arrive together: the loader keys its entry on the path and reports
-              it back by the id. */
-    if (write_string(client->fd, files[i].module_id) == -1) {
-      LOGE("Failed writing a Zygisk Next module id.");
-
-      break;
-    }
-
-    ret = write_uint8_t(client->fd, (uint8_t)(files[i].companion ? 1 : 0));
-    if (ret != (ssize_t)sizeof(uint8_t)) {
-      LOGE("Failed writing a Zygisk Next companion flag.");
-
-      break;
-    }
-
-    if (write_fd(client->fd, files[i].fd) == -1) {
-      LOGE("Failed sending a Zygisk Next module fd.");
-
-      break;
-    }
-  }
-
-  free_zn_module_files(files, files_len);
 }
 
 static void handle_request_companion_socket(struct Client *client) {
@@ -2119,9 +927,7 @@ static const struct ActionHandler kActionHandlers[] = {
   { GetModuleDir,           "GetModuleDir",           handle_get_module_dir          },
   { ZygoteRestart,          "ZygoteRestart",          handle_zygote_restart          },
   { UpdateMountNamespace,   "UpdateMountNamespace",   handle_update_mount_namespace  },
-  { RemoveModule,           "RemoveModule",           handle_remove_module           },
-  { ReadZnModules,          "ReadZnModules",          handle_read_zn_modules         },
-  { SpawnZnCompanion,       "SpawnZnCompanion",       handle_spawn_zn_companion      }
+  { RemoveModule,           "RemoveModule",           handle_remove_module           }
 };
 
 static const struct ActionHandler *find_action_handler(enum DaemonSocketAction action) {

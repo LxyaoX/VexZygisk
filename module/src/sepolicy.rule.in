@@ -6,14 +6,15 @@
 type zygisk_file file_type
 typeattribute zygisk_file mlstrustedobject
 
-# INFO: Every domain, not zygote alone: a Zygisk Next module is dlopened inside
-#       an application, which sits outside the zygote domain and holds its own
-#       end of this socket. A zygote-only rule leaves it unable to connect.
+# INFO: Every domain, not zygote alone: a module's companion socket is reached
+#       from an application, which sits outside the zygote domain and holds its
+#       own end of this socket. A zygote-only rule leaves it unable to connect.
 allow domain zygisk_file dir {search getattr}
 allow domain zygisk_file sock_file {read write getattr open}
 
-# INFO: "map" and "execute" on top of "read open": the loader mmaps and dlopens
-#       module libraries arriving as unlabeled memfds where tmpfs is unlabelled.
+# INFO: "map" and "execute" on top of "read open": the loader maps module
+#       libraries handed over as descriptors, whose label is not the one the
+#       module directory carried.
 allow zygote unlabeled file {getattr read open map execute}
 allow zygote zygote capability sys_chroot
 
@@ -34,49 +35,8 @@ allow zygote zygote process execmem
 allow system_server system_server process execmem
 allow zygote tmpfs file *
 
-# INFO: The same tmpfs memfds for a process outside the zygote domain. Kept to
-#       what a dlopen performs rather than a wildcard, since this one is not
-#       limited to zygote.
+# INFO: The same mapping grant for a process outside the zygote domain. Kept to
+#       what loading a library performs rather than a wildcard, since this one
+#       is not limited to zygote.
 allow domain tmpfs file {open getattr map read execute}
 allow zygote appdomain_tmpfs file *
-
-# INFO: Zygisk Next libraries travel as memfds created by the daemon, so they
-#       carry its own domain label and dlopen needs "execute" from whichever
-#       process loads the module. On the memfd's type on purpose: "allow * *
-#       file execute" also grants untrusted_app execute on dex2oat_exec, which
-#       is what makes LSPosed/Vector report its dex2oat wrapper as unsupported.
-#       Subject stays "*" because per-application targets are dlopened inside
-#       the app itself, so the executing domain cannot be enumerated here.
-#
-#       The wildcard target does widen this to every file the daemon's domain
-#       labels, not only memfds. Narrowing it is left undone deliberately: the
-#       obvious spelling, "neverallow * @ROOT_DOMAIN@ dex2oat_exec file
-#       execute", names a type GSI and several vendor policies do not define,
-#       and a rule naming an undefined type is a hard compile error - the whole
-#       policy then fails to load and nothing can be dlopened at all.
-allow * @ROOT_DOMAIN@ file execute
-
-# INFO: How a memfd gets labelled depends on the kernel, and no two cases share
-#       a type. GKI gives an anonymous tmpfs inode, already covered for zygote
-#       above while the companion had nothing at all. Other kernels label it
-#       `unlabeled`, where zygote had only `read open` - enough to take the
-#       descriptor and still fail the mmap that dlopen performs. Android 17
-#       QPR1 and later label it through security_inode_init_security_anon() as
-#       the creating task's SID under the new `memfd_file` class, which neither
-#       tmpfs nor unlabeled matches, so every SCM_RIGHTS transfer is dropped.
-#       Without these the loader receives nothing for ReadZnModules while
-#       descriptor-free actions such as GetProcessFlags keep working - a
-#       failure that looks like a matching problem rather than a permission one.
-#
-#       NOTE: no statement terminators in these comments. The policy parser
-#       splits on one before it strips comments, so a single occurrence here
-#       truncates the comment and hands the remainder to the rule parser,
-#       which rejects it and the installer then refuses the whole module.
-allow zygote @ROOT_DOMAIN@ memfd_file {getattr read write map execute}
-
-# INFO: The same grant for the domains a Zygisk Next library is dlopened in.
-allow domain @ROOT_DOMAIN@ memfd_file {getattr read write map execute}
-
-allow @ROOT_DOMAIN@ @ROOT_DOMAIN@ memfd_file {getattr read write map execute}
-allow @ROOT_DOMAIN@ tmpfs file {getattr read write map execute}
-allow @ROOT_DOMAIN@ unlabeled file {getattr read write map execute}

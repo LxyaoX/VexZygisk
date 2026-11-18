@@ -14,7 +14,6 @@
 #include <sys/mman.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
-#include <sys/timerfd.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -39,11 +38,6 @@ struct environment_information {
   char *root_impl;
   struct daemon_module *modules;
   uint32_t modules_len;
-  /* INFO: How many of those are Zygisk Next modules. The listing asks whether
-             a plain module has a Next twin, and that question is decided by a
-             scan of the whole list - but when not one module is a Next module
-             the answer is no without looking, which is the usual machine. */
-  uint32_t zn_len;
 };
 
 static struct environment_information environment_information;
@@ -54,15 +48,7 @@ static struct environment_information environment_information;
 static void free_environment_information(void) {
   if (environment_information.modules != NULL) {
     for (uint32_t i = 0; i < environment_information.modules_len; i++) {
-      struct daemon_module *module = &environment_information.modules[i];
-
-      free(module->name);
-
-      if (module->targets != NULL) {
-        for (uint32_t t = 0; t < module->targets_len; t++) free(module->targets[t]);
-
-        free(module->targets);
-      }
+      free(environment_information.modules[i].name);
     }
   }
 
@@ -106,9 +92,6 @@ static struct rezygiskd_status status = {
 static int monitor_epoll_fd;
 static bool monitor_events_running = true;
 
-/* INFO: The descriptor the card's refresh timer fires on, or -1 while there is
-         no timer to fire. */
-static int status_refresh_fd = -1;
 typedef void (*monitor_event_callback_t)(void);
 
 bool monitor_events_init() {
@@ -144,77 +127,10 @@ void monitor_events_stop() {
   monitor_events_running = false;
 }
 
-/* How often the card is written again while the Zygisk Next path has not
-   started working.
-
-   Every other write is an event - a command, an injection - and the fastest of
-   those lands in the first moments of a boot, when most of the system has not
-   started yet. One slow tick while the answer is still no makes the card
-   describe a booted system instead. */
-#define STATUS_REFRESH_SECONDS 60
-
-/* And how many times it is worth doing.
-
-   The two halves of the card arrive at different times: the monitor knows its
-   own state at once, while the daemon's half - which plan was built for which
-   process - only exists once a loader has asked it, which is later. The card is
-   written on events, and the last event of a boot can land between the two, so
-   it ticks a fixed number of times and then stops. Past the bound the monitor
-   writes on events alone, rather than rewriting the module property file every
-   minute for a question nobody is asking any more. */
-#define STATUS_REFRESH_TICKS 30
-
-static size_t status_refresh_ticks = 0;
-
-static void status_refresh_callback() {
-  uint64_t expirations = 0;
-
-  /* INFO: Read to disarm it. A timerfd nobody reads stays readable, and the
-            loop this is called from would spin on it. */
-  while (read(status_refresh_fd, &expirations, sizeof(expirations)) == -1 && errno == EINTR) {
-  }
-
-  (void)update_status(NULL);
-
-  status_refresh_ticks++;
-
-  if (status_refresh_ticks < STATUS_REFRESH_TICKS) return;
-
-  const struct itimerspec stop = { 0 };
-
-  if (timerfd_settime(status_refresh_fd, 0, &stop, NULL) == -1) PLOGE("timerfd_settime");
-}
-
-static bool status_refresh_init() {
-  status_refresh_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-  if (status_refresh_fd == -1) {
-    PLOGE("timerfd_create");
-
-    return false;
-  }
-
-  const struct itimerspec every = {
-    .it_interval = {
-      .tv_sec = STATUS_REFRESH_SECONDS
-    },
-    .it_value = {
-      .tv_sec = STATUS_REFRESH_SECONDS
-    }
-  };
-
-  if (timerfd_settime(status_refresh_fd, 0, &every, NULL) == -1) {
-    PLOGE("timerfd_settime");
-
-    return false;
-  }
-
-  return monitor_events_register_event(status_refresh_callback, status_refresh_fd, EPOLLIN);
-}
-
 void monitor_events_loop() {
-  struct epoll_event events[3];
+  struct epoll_event events[2];
   while (monitor_events_running) {
-    int nfds = epoll_wait(monitor_epoll_fd, events, 3, -1);
+    int nfds = epoll_wait(monitor_epoll_fd, events, 2, -1);
     if (nfds == -1 && errno != EINTR) {
       PLOGE("epoll_wait");
 
@@ -405,7 +321,6 @@ static void read_daemon_modules(uint32_t modules_len) {
   free_environment_information();
 
   environment_information.modules_len = modules_len;
-  environment_information.zn_len = 0;
   environment_information.modules = calloc(modules_len, sizeof(struct daemon_module));
 
   if (environment_information.modules == NULL) {
@@ -484,54 +399,7 @@ static void read_daemon_modules(uint32_t modules_len) {
     module->name = dgram_take_string(&dgram, "module name");
     if (module->name == NULL) goto set_info_modules_cleanup;
 
-    uint8_t module_type = 0;
-    if (!dgram_take_u8(&dgram, &module_type)) {
-      LOGE("read VexZygiskd%s module type", MONITOR_ABI);
-
-      goto set_info_modules_cleanup;
-    }
-
-    module->is_zn = module_type == 1;
-    if (module->is_zn) environment_information.zn_len++;
-
-    if (module->is_zn) {
-      uint8_t companion = 0;
-      if (!dgram_take_u8(&dgram, &companion)) {
-        LOGE("read VexZygiskd%s module companion", MONITOR_ABI);
-
-        goto set_info_modules_cleanup;
-      }
-      module->companion = companion == 1;
-
-      uint32_t targets_len = 0;
-      if (!dgram_take_u32(&dgram, &targets_len)) {
-        LOGE("read VexZygiskd%s module targets len", MONITOR_ABI);
-
-        goto set_info_modules_cleanup;
-      }
-
-      if (targets_len > 0) {
-        module->targets = calloc(targets_len, sizeof(char *));
-        if (module->targets == NULL) {
-          PLOGE("malloc VexZygiskd%s module targets", MONITOR_ABI);
-
-          goto set_info_modules_cleanup;
-        }
-
-        /* INFO: The array is calloc'ed, so a half-filled one - a failed read
-                  jumps to the cleanup below - still has NULL in every slot the
-                  loop did not reach, and free_environment_information can walk
-                  the full count without touching an uninitialised pointer. */
-        module->targets_len = targets_len;
-
-        for (uint32_t t = 0; t < targets_len; t++) {
-          module->targets[t] = dgram_take_string(&dgram, "module target");
-          if (module->targets[t] == NULL) goto set_info_modules_cleanup;
-        }
-      }
-    }
-
-    LOGD("VexZygiskd%s module %zu: %s (%s)", MONITOR_ABI, i, module->name, module->is_zn ? "next" : "zygisk");
+    LOGD("VexZygiskd%s module %zu: %s", MONITOR_ABI, i, module->name);
 
     i++;
   }
@@ -1655,7 +1523,6 @@ static bool update_status(const char *message) {
     .daemon_error = status.daemon_error_info,
     .modules = environment_information.modules,
     .modules_len = environment_information.modules_len,
-    .zn_len = environment_information.zn_len,
     .supported = status.supported,
     .zygote_injected = status.zygote_injected,
     .daemon_running = status.daemon_running,
@@ -1711,10 +1578,6 @@ void init_monitor() {
 
     exit(1);
   }
-
-  /* INFO: Not fatal on its own: without it the card is only written on events,
-            which is what it did before the timer existed. */
-  if (!status_refresh_init()) LOGE("failed to start the status refresh timer");
 
   monitor_events_loop();
 

@@ -30,7 +30,6 @@
 #include "registers.h"
 #include "hiding.h"
 #include "unmount.h"
-#include "zn_loader.h"
 #include "zygote_targets.h"
 
 void *start_addr = NULL;
@@ -165,12 +164,6 @@ static size_t jni_hook_list_count = 0;
 
 struct rezygisk_module *zygisk_modules = NULL;
 size_t zygisk_module_length = 0;
-
-/* INFO: The daemon reports whether any Zygisk Next module exists at all in
-           the GetProcessFlags answer; until the first answer arrives the
-           state is unknown and the per-fork query still runs. */
-static bool zn_presence_known = false;
-static bool zn_modules_present = false;
 
 /* The specialize pipeline is a process-global sequence (g_ctx, the cached fork
    pid), and nothing promises the caller is single-threaded: two threads could
@@ -1296,8 +1289,7 @@ static bool load_modules_only(void) {
   /* INFO: Failure symmetry, reviewed: csoloader keeps no reference count,
             so a load that fails inside csoloader_load has mapped nothing and
             needs no release, while a library that loads but then misses its
-            entry point is explicitly csoloader_unload'ed below — the same
-            discipline the Zygisk Next path applies with dlclose. */
+            entry point is explicitly csoloader_unload'ed below. */
   for (size_t i = 0; i < ms.modules_count; i++) {
     const char *lib_path = ms.modules[i];
 
@@ -1482,21 +1474,6 @@ static void isolate_denylisted(struct zygisk_context *ctx, bool is_app_zygote) {
   }
 }
 
-/* The Zygisk Next plan for the process being specialized.
-
-   Modules are resolved per process, since the zygote only loaded the ones
-   targeting it. Asked after the fd sanitizer, so the memfds and companion
-   sockets the load opens are not closed as leaked, and after the namespace
-   switch, so the daemon's handover is not lost to setns.
-
-   Whether any Zygisk Next module exists is a daemon-wide fact: the first flags
-   answer is remembered and later forks skip the round trip. */
-static void zn_load_plan_for_specializing(const char *process_name) {
-  if (zn_presence_known && !zn_modules_present) return;
-
-  zn_load_modules_for_process(process_name);
-}
-
 static void rz_app_specialize_pre(struct zygisk_context *ctx) {
   FLAG_SET(ctx, APP_SPECIALIZE);
 
@@ -1504,15 +1481,6 @@ static void rz_app_specialize_pre(struct zygisk_context *ctx) {
   if (!resolve_app_uid(ctx, &uid)) return;
 
   ctx->info_flags = rezygiskd_get_process_flags(uid, ctx->process);
-
-  /* INFO: Whether any Zygisk Next module exists is a daemon-wide fact, and the
-            first flags answer is the only place it is learned. Unknown until
-            that answer arrives - system_server is typically the very first
-            fork - in which case the query still runs. */
-  if (!zn_presence_known) {
-    zn_modules_present = (ctx->info_flags & PROCESS_ZN_PRESENT) == PROCESS_ZN_PRESENT;
-    zn_presence_known = true;
-  }
 
   capture_clean_namespace(ctx);
 
@@ -1567,7 +1535,7 @@ static void rz_app_specialize_post(struct zygisk_context *ctx) {
 
     /* INFO: Nothing was loaded into this process, so the scan could only come
               back empty and it is the whole cost of asking. */
-    if (zygisk_module_length > 0 || zn_loaded_library_count() > 0) hide_module_maps();
+    if (zygisk_module_length > 0) hide_module_maps();
   }
 
   /* INFO: Allow the process name string to be released */
@@ -1600,7 +1568,6 @@ static void rz_nativeSpecializeAppProcess_pre(struct zygisk_context *ctx) {
   FLAG_SET(ctx, SPECIALIZE_IN_PLACE);
 
   rz_app_specialize_pre(ctx);
-  zn_load_plan_for_specializing(ctx->process);
 }
 
 static void rz_nativeSpecializeAppProcess_post(struct zygisk_context *ctx) {
@@ -1633,8 +1600,6 @@ static void rz_nativeForkSystemServer_pre(struct zygisk_context *ctx) {
   rz_run_modules_pre(ctx);
 
   rz_sanitize_fds(ctx);
-
-  zn_load_plan_for_specializing("system_server");
 }
 
 static void rz_nativeForkSystemServer_post(struct zygisk_context *ctx) {
@@ -1663,8 +1628,8 @@ static void rz_nativeForkAndSpecialize_pre(struct zygisk_context *ctx) {
             used to take it - the parent's copy existed only to be handed back
             in rz_fork_post - so the zygote paid one JNI allocation, one pinned
             string and one release per process it spawned, for a value only the
-            child ever reads: the daemon query, the webview check and the module
-            plan are all below this line. */
+            child ever reads: the daemon query and the webview check are both
+            below this line. */
   ctx->process = (*ctx->env)->GetStringUTFChars(ctx->env, *ctx->args.app->nice_name, NULL);
   if (ctx->process == NULL) {
     /* INFO: The failure leaves an OOM exception pending; the wrapper calls the
@@ -1679,8 +1644,6 @@ static void rz_nativeForkAndSpecialize_pre(struct zygisk_context *ctx) {
 
   rz_app_specialize_pre(ctx);
   rz_sanitize_fds(ctx);
-
-  zn_load_plan_for_specializing(ctx->process);
 }
 
 static void rz_nativeForkAndSpecialize_post(struct zygisk_context *ctx) {

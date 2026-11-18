@@ -23,23 +23,12 @@ enum rezygiskd_actions {
   GetModuleDir,
   ZygoteRestart,
   UpdateMountNamespace,
-  RemoveModule,
-  ReadZnModules,
-  SpawnZnCompanion
+  RemoveModule
 };
 
 struct zygisk_modules {
   char **modules;
   size_t modules_count;
-};
-
-/* A Zygisk Next library as the daemon hands it over: the path it was resolved
-   from, its module, whether that module asked for a companion, and the fd. */
-struct zn_module_file {
-  char *lib_path;
-  char *module_id;
-  bool companion;
-  int fd;
 };
 
 /* Only the matching member is compiled in. Its name deliberately differs from
@@ -79,18 +68,6 @@ void free_rezygisk_info(struct rezygisk_info *info);
 bool rezygiskd_read_modules(struct zygisk_modules *modules);
 
 void free_modules(struct zygisk_modules *modules);
-
-/* Asks for the Zygisk Next libraries targeting this process. False when the
-   daemon cannot be reached, which is the signal to read the modules directly.
-   `retry` is the number of extra attempts, so the call makes retry + 1 and
-   waits at most retry * retry_delay_us. */
-bool rezygiskd_read_zn_modules(const char *process_name, const char *process_path, uint8_t retry, uint32_t retry_delay_us, struct zn_module_file **out, size_t *out_len);
-
-void free_zn_module_files(struct zn_module_file *files, size_t len);
-
-/* Has the daemon spawn a companion for this library; returns its control
-   socket, or -1 when it is unavailable. */
-int rezygiskd_spawn_zn_companion(const char *lib_path);
 
 int rezygiskd_connect_companion(size_t index);
 

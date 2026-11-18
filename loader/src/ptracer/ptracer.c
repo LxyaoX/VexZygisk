@@ -28,10 +28,9 @@
 
            The previous path hand-mapped the library with CSOLoader: the PT_LOAD
            segments, the relocations, and a jump to the entry - and nothing else.
-           So DT_INIT_ARRAY was never walked and no constructor ran, and the
-           object never appeared in the linker's soinfo list, which is what
-           LSPosed probes when it reports "Zygisk Next API is unavailable" with
-           the library plainly loaded.
+           So            DT_INIT_ARRAY was never walked and no constructor ran, and the
+           object never appeared in the linker's soinfo list, which is what a
+           module probing the API sees when the library is plainly loaded.
 
            Letting the linker do it fixes both by construction: it walks
            DT_INIT_ARRAY itself and publishes a soinfo. */

@@ -16,10 +16,6 @@
    fixed underlying type is a C23 extension. */
 #define PROCESS_GRANTED_ROOT (1u << 0)
 #define PROCESS_ON_DENYLIST (1u << 1)
-/* Whether any Zygisk Next module exists at all, so a device without one skips
-   the per-fork ReadZnModules round trip. A global fact from the last module
-   load, never passed on to modules (the loader strips it). */
-#define PROCESS_ZN_PRESENT (1u << 2)
 #define PROCESS_IS_MANAGER (1u << 27)
 #define PROCESS_ROOT_IS_APATCH (1u << 28)
 #define PROCESS_ROOT_IS_KSU (1u << 29)
@@ -34,9 +30,7 @@ enum DaemonSocketAction {
   GetModuleDir           = 5,
   ZygoteRestart          = 6,
   UpdateMountNamespace   = 7,
-  RemoveModule           = 8,
-  ReadZnModules          = 9,
-  SpawnZnCompanion       = 10
+  RemoveModule           = 8
 };
 
 /* Two states, not four: how the implementation was found is answered by whether
