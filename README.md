@@ -4,20 +4,18 @@
 
 VexZygisk is a standalone implementation of Zygisk for KernelSU and APatch, based on ReZygisk.
 
-The codebase has been rewritten to C, bringing not only a much cleaner codebase that is easier to follow, but also lighter binaries that are also faster. Custom linkers also have been introduced to future-proof VexZygisk against future detections: standard Zygisk modules are mapped by the built-in csoloader instead of the system linker, defeating linker-based detection on that path, while Zygisk Next modules keep loading through the system linker as their contract expects.
+The codebase has been rewritten to C, bringing not only a much cleaner codebase that is easier to follow, but also lighter binaries that are also faster. A custom loader also has been introduced to future-proof VexZygisk against future detections: module libraries are mapped by the built-in csoloader instead of the system linker, defeating linker-based detection on that path.
 
 The project builds for **one root solution at a time**: the KernelSU flavour and the APatch flavour are separate archives produced by the same CI run, and each one carries only its own backend — no traces of the other root solution ship inside.
 
 ## Why?
 
-The latest releases of Zygisk Next are not open-source, reserving entirely the code for its developers. Not only does that limit our ability to contribute to the project, but also impossibilities the audit of the code, which is a major security concern, as Zygisk Next is a module that runs with superuser (root) privileges, having access to the entire system.
-
-The Zygisk Next developers are famous and trusted in the Android community, however, this doesn't mean that the code is not malicious or vulnerable. There may be good reasons to keep it closed-source, but this project takes the opposite view.
+A Zygisk host runs with root privileges inside every app process, so its code has to be auditable. VexZygisk is a standalone, open implementation: the injection, mount handling and module loading paths all live in this repository rather than in a closed-source companion.
 
 ## Advantages
 
 - FOSS (Forever)
-- Zygisk Next module support: `zn_modules.txt` targets, companions, symbol resolvers and the module API gate
+- ELF symbol lookups and GOT walking in a small `no_std` Rust core, with no allocation on the device path
 - KernelSU **and** APatch support, as dedicated builds
 - Denylist handled by reverting the mounts in the hidden process itself, with the cached clean namespace as the fallback
 - The traces a revert cannot reach are hidden as well: the module libraries a hidden process still has mapped, and the mount line bionic keeps in one static buffer
@@ -78,8 +76,7 @@ both are only final once the modules have run:
 - the module libraries still mapped into it, each naming its own file in
   `/proc/self/maps`. Those mappings are replaced by anonymous copies of the same
   bytes at the same address, so the library keeps running from where it was and
-  the name is gone — the Zygisk Next libraries included, which the loader hands
-  over as memfds and which no path under `/data` describes.
+  the name is gone.
 - the mount line bionic parses into a single static buffer. The zygote reads it
   while it still carries the module mounts and every application forked from it
   inherits it, so a process whose tree was cleaned can still read the traces out
@@ -118,16 +115,6 @@ exists, so the scan finds nothing and changes nothing.
 
 Only the KernelSU flavour ships this. APatch has no comparable stage, so the
 APatch archive removes any copy it finds rather than installing one.
-
-## Zygisk Next support
-
-VexZygisk speaks the Zygisk Next API, so modules written against it — recent LSPosed builds among them — can load through it.
-
-- Modules are listed through `zn_modules.txt`, with per-target resolution and optional companions. A companion is forked from the daemon so it keeps the daemon's privileged SELinux domain instead of the restricted domain of the process that loaded the module.
-- Module libraries are handed over as memfds rather than descriptors of the files themselves, so an unprivileged target can load them without touching the module files' own mode and SELinux label.
-- Zygisk and Zygisk Next modules are served side by side: a module may ship both a `zygisk/<arch>.so` and a `zn_modules.txt` (LSPosed does), and each is handled by its own path without excluding the other.
-- Modules are served the Zygisk Next API as it stands: one declaring version 3 or 4 loads, and one declaring anything else is refused rather than handed a table whose fields have moved since it was built.
-- The two hook entries of that API are refused: this build ships no PLT or inline hooking engine, so a module that calls `pltHook` or `inlineHook` is told the hook could not be placed rather than handed one that never fires. Symbol resolvers, `getBaseAddress`, `symbolLookup`, `forEachSymbols` and companions are served as usual.
 
 ## Dependencies
 
@@ -220,8 +207,6 @@ This repository stands on other projects' work; the credits below map the
 pieces to their sources.
 
 * [ReZygisk](https://github.com/PerformanC/ReZygisk): The base project this repository forks and rewrites in C
-* [ZygiskNext](https://github.com/Dr-TSNG/ZygiskNext): The original Zygisk Next module architecture and the API VexZygisk speaks
-* [ZygiskNextNext](https://github.com/VeryBaaad/ZygiskNextNext): Reference implementation for the standalone Zygisk Next API
 * [Magisk](https://github.com/topjohnwu/Magisk): The foundation of modern Android root and Zygisk itself
 * [OnyxZygisk](https://github.com/OnyxZygisk/OnyxZygisk): The revert-only mount model — the trace selection and the in-place revert a hidden process runs on its own copy of the mount tree
 * [KernelSU](https://github.com/tiann/KernelSU): The kernel interface the KernelSU flavour talks to

@@ -62,13 +62,8 @@ static void check_module_libraries(void) {
   CHECK(hides(ZYGISK_LOADER_LIB, true, DATA_DEV), "the injector itself is not hidden");
   CHECK(hides(ZYGISK_LOADER_LIB " (deleted)", true, DATA_DEV),
         "an injector whose file is gone is not hidden");
-
-  /* INFO: The device decides a path but not the memfd, which is where a
-            Zygisk Next library has to be loaded from - there is no /data
-            device number that could ever describe it. */
-  CHECK(hides(ZYGISK_ZN_MEMFD, true, OTHER_DEV), "the Zygisk Next memfd is not hidden");
-  CHECK(hides(ZYGISK_ZN_MEMFD " (deleted)", true, OTHER_DEV),
-        "a deleted Zygisk Next memfd is not hidden");
+  CHECK(hides(ZYGISK_LOADER_LIB, true, OTHER_DEV),
+        "an injector on another device is not hidden");
 }
 
 static void check_everything_else(void) {
@@ -77,16 +72,16 @@ static void check_everything_else(void) {
   CHECK(!hides(NULL, true, DATA_DEV), "an anonymous map is hidden");
   CHECK(!hides("/system/lib64/libc.so", true, DATA_DEV), "a system library is hidden");
   CHECK(!hides("/memfd:/boot-image-methods.art", true, DATA_DEV), "the ART image is hidden");
-  CHECK(!hides(ZYGISK_ZN_MEMFD, false, DATA_DEV), "a shared Zygisk Next memfd is hidden");
-
-  /* INFO: The memfd's name is the whole of what identifies it - it is on no
-            filesystem, so nothing else about the mapping can - and a name that
-            merely begins with it belongs to somebody else. A prefix compare
-            answers this one wrong, which is why the rule is the whole name. */
-  CHECK(!hides(ZYGISK_ZN_MEMFD "-2", true, OTHER_DEV),
-        "a memfd whose name only starts with ours is hidden");
-  CHECK(!hides(ZYGISK_ZN_MEMFD "x", true, OTHER_DEV),
-        "a memfd named with ours as a prefix is hidden");
+  /* INFO: The name match is a whole-name compare with only the "(deleted)"
+            suffix ignored; a path that merely starts with the injector's
+            belongs to somebody else. The prefix compare a naive strncmp would
+            give is what these two refuse. */
+  CHECK(path_is(ZYGISK_LOADER_LIB " (deleted)", ZYGISK_LOADER_LIB),
+        "a deleted injector path is not matched");
+  CHECK(!path_is(ZYGISK_LOADER_LIB "-2", ZYGISK_LOADER_LIB),
+        "a path that only starts with ours is matched");
+  CHECK(!path_is(ZYGISK_LOADER_LIB "x", ZYGISK_LOADER_LIB),
+        "a path with ours as a prefix is matched");
 
   CHECK(!hides("/data/local/tmp/loader.so", true, DATA_DEV),
         "a library mapped from /data/local/tmp is hidden");

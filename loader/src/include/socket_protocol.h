@@ -1,5 +1,5 @@
-#ifndef ZN_SOCKET_PROTOCOL_H
-#define ZN_SOCKET_PROTOCOL_H
+#ifndef REZYGISK_SOCKET_PROTOCOL_H
+#define REZYGISK_SOCKET_PROTOCOL_H
 
 #include <errno.h>
 #include <stdint.h>
@@ -18,7 +18,7 @@
 
 /* The kernel may copy a struct cmsghdr into the control buffer, so it has to be
    aligned as one. Both ends allocate this and the sizes must match. */
-union zn_cmsg_buffer {
+union cmsg_buffer {
   struct cmsghdr header;
   char control[CMSG_SPACE(sizeof(int))];
 };
@@ -71,7 +71,7 @@ static inline ssize_t read_loop(int fd, void *buf, size_t count) {
 
 /* One descriptor with the single data byte the peer writes alongside it. */
 static inline ssize_t write_fd(int fd, int sendfd) {
-  union zn_cmsg_buffer cmsgbuf;
+  union cmsg_buffer cmsgbuf;
   char buf[1] = { 0 };
 
   struct iovec iov = {
@@ -99,7 +99,7 @@ static inline ssize_t write_fd(int fd, int sendfd) {
 }
 
 static inline int read_fd(int fd) {
-  union zn_cmsg_buffer cmsgbuf;
+  union cmsg_buffer cmsgbuf;
   char buf[1] = { 0 };
 
   struct iovec iov = {
@@ -197,4 +197,4 @@ static inline ssize_t write_string(int fd, const char *str) {
   return write_loop(fd, str, str_len) == (ssize_t)str_len ? (ssize_t)str_len : -1;
 }
 
-#endif /* ZN_SOCKET_PROTOCOL_H */
+#endif /* REZYGISK_SOCKET_PROTOCOL_H */

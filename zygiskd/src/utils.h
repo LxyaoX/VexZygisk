@@ -96,10 +96,6 @@ int chcon(const char *path, const char *restrict context);
 
 int unix_listener_from_path(const char *path);
 
-/* *shared reports ownership: true means a daemon-cached sealed copy later
-   requests reuse (never close it), false a per-call copy the caller closes. */
-int create_library_fd(const char *restrict path, bool *shared);
-
 ssize_t read_string(int fd, char *restrict buf, size_t buf_size);
 
 bool check_unix_socket(int fd, bool block);

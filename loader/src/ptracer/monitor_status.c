@@ -3,9 +3,9 @@
  * The module card: what this monitor's state reads as on the manager's screen.
  *
  * The monitor's own file is about tracing; this is about the sentence a user
- * reads afterwards - the run line, the module list, the Zygisk Next diagnosis -
- * and the two files it goes into (module.prop's description and state.json),
- * which are the only places a release build still says anything.
+ * reads afterwards - the run line and the module list - and the two files it
+ * goes into (module.prop's description and state.json), which are the only
+ * places a release build still says anything.
  *
  * Everything here is drawn from the struct monitor_status_view the monitor fills
  * in where it hands the state over. Nothing caches a copy: a second copy of "is
@@ -20,7 +20,6 @@
 #include <errno.h>
 
 #include <dirent.h>
-#include <fcntl.h>
 #include <unistd.h>
 
 #include "utils.h"
@@ -38,21 +37,6 @@ static char module_text[2048];
          that follows it. One size serves the text assembled for a write and the
          read-back that decides whether that write has to happen at all. */
 #define PROP_TEXT_MAX (sizeof(pre_section) + sizeof(post_section) + sizeof(module_text) + 1024)
-
-/* INFO: A module that ships both a Zygisk library and a zn_modules.txt lands in
-         both the plain and the Zygisk Next lists, so check for a Next twin
-         before listing the plain copy. */
-static bool has_zn_twin(const struct monitor_status_view *view, const char *name) {
-  if (view->zn_len == 0) return false;
-
-  for (uint32_t j = 0; j < view->modules_len; j++) {
-    const struct daemon_module *twin = &view->modules[j];
-
-    if (twin->is_zn && twin->name != NULL && strcmp(twin->name, name) == 0) return true;
-  }
-
-  return false;
-}
 
 /* INFO: Appends to a bounded buffer and keeps the offset inside it. snprintf
          reports the length it would have written rather than the length it did,
@@ -97,14 +81,10 @@ static void build_module_text(const struct monitor_status_view *view) {
     const struct daemon_module *module = &view->modules[i];
     if (module->name == NULL) continue;
 
-    if (!module->is_zn && has_zn_twin(view, module->name)) continue;
-
     if (!first) append_bounded(module_text, sizeof(module_text), &off, ", ");
     first = false;
 
     append_bounded(module_text, sizeof(module_text), &off, module->name);
-
-    if (module->is_zn) append_bounded(module_text, sizeof(module_text), &off, " (Next)");
   }
 
   append_bounded(module_text, sizeof(module_text), &off, " \u00b7 ");
@@ -153,71 +133,6 @@ static void json_escape_into(char *dst, size_t cap, const char *src) {
   }
 
   dst[off] = '\0';
-}
-
-/* INFO: The Zygisk Next half of the status line.
-
-         Two faults look alike from the outside - the daemon was never asked,
-         and a plan came back naming nothing - and only the daemon can tell
-         them apart. It writes down which, and that is read back here: a release
-         build keeps no log, and the card is where somebody looks. */
-static void append_zn_status_text(char *out, size_t cap) {
-  int fd = 0;
-
-  do {
-    fd = open(ZYGISK_ZN_STATUS, O_RDONLY | O_CLOEXEC);
-  } while (fd == -1 && errno == EINTR);
-
-  if (fd == -1) {
-    str_append_bounded(out, cap, " (no plan asked)");
-
-    return;
-  }
-
-  char contents[768] = { 0 };
-  ssize_t got = 0;
-
-  do {
-    got = read(fd, contents, sizeof(contents) - 1);
-  } while (got == -1 && errno == EINTR);
-
-  close(fd);
-
-  /* An empty file and no file say the same thing: nobody has asked. */
-  if (got <= 0) {
-    str_append_bounded(out, cap, " (no plan asked)");
-
-    return;
-  }
-
-  contents[(size_t)got] = '\0';
-
-  str_append_bounded(out, cap, " (");
-
-  bool first = true;
-  char *line = contents;
-
-  for (char *cursor = contents; ; cursor++) {
-    if (*cursor != '\n' && *cursor != '\0') continue;
-
-    const char saved = *cursor;
-    *cursor = '\0';
-
-    if (line[0] != '\0') {
-      if (!first) str_append_bounded(out, cap, " | ");
-
-      str_append_bounded(out, cap, line);
-      first = false;
-    }
-
-    *cursor = saved;
-
-    if (saved == '\0') break;
-
-    line = cursor + 1;
-  }
-
-  str_append_bounded(out, cap, ")");
 }
 
 /* INFO: Appends the live status to `out`, every append bounded to its
@@ -295,8 +210,6 @@ static void append_status_text(const struct monitor_status_view *view, char *out
     }
   }
 
-  append_zn_status_text(out, cap);
-
   /* INFO: Why the monitor is not tracing, once that is known. The state alone
             says what happened but not why, and the reason is what tells a stop
             that was asked for apart from one that went wrong. */
@@ -365,23 +278,7 @@ static bool write_state_json(const struct monitor_status_view *view) {
       char module_json[256];
       json_escape_into(module_json, sizeof(module_json), module->name ? module->name : "");
 
-      fprintf(json, "{\"id\": \"%s\", \"next\": %s, \"companion\": %s",
-              module_json,
-              module->is_zn ? "true" : "false",
-              module->companion ? "true" : "false");
-
-      if (module->targets) {
-        fprintf(json, ", \"targets\": [");
-        for (uint32_t t = 0; t < module->targets_len; t++) {
-          if (t > 0) fprintf(json, ", ");
-
-          char target_json[256];
-          json_escape_into(target_json, sizeof(target_json), module->targets[t] ? module->targets[t] : "");
-
-          fprintf(json, "\"%s\"", target_json);
-        }
-        fprintf(json, "]");
-      }
+      fprintf(json, "{\"id\": \"%s\"", module_json);
 
       fprintf(json, "}");
     }
@@ -447,11 +344,9 @@ bool monitor_status_update(const struct monitor_status_view *view, const char *m
   /* INFO: Written only when the file does not already say this. Opening it for
             writing truncates it first, and the manager reads it to draw the
             card: a write for a line that did not change is a reader that can
-            catch the card half-written, and the refresh timer fires thirty of
-            them per boot on behalf of a card that has not moved since the last
-            one. A file reset behind our back - the boot stages restore the
-            pristine copy - is a difference here, which is the other half of
-            what comparing buys. */
+            catch the card half-written. A file reset behind our back - the boot
+            stages restore the pristine copy - is a difference here, which is
+            the other half of what comparing buys. */
   if (prop_holds(wanted)) return true;
 
   FILE *prop = fopen(ZYGISK_MODULE_PROP, "w");

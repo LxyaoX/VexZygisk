@@ -23,13 +23,10 @@ else
 endif
 
 # INFO: One function per section, and one section per datum, so the linker can
-#       drop what nothing reaches. The daemon links the Rust archive the loader
-#       links (common.mk), and it uses exactly one symbol out of it - the
-#       zn_modules.txt line parser. Without these the archive arrives as one
-#       piece per codegen unit, and a link that has to keep a whole object file
-#       because it needs one function out of it kept all of them: the daemon went
-#       from 34 KiB to 238 KiB, past its 56 KiB budget, while the loader - which
-#       has had these two flags and --gc-sections all along - grew by 5.
+#       drop what nothing reaches. The daemon has a 56 KiB budget and most of
+#       its source is reachable from the action table, but the root-impl and
+#       utility files carry helpers for both flavours; --gc-sections keeps the
+#       other flavour's code out of each binary.
 TYPE_CFLAGS += -ffunction-sections -fdata-sections
 TYPE_LDFLAGS += -Wl,--gc-sections
 
@@ -42,14 +39,11 @@ ZYGISKD_CFLAGS = -D_GNU_SOURCE -std=c99 -Wpedantic -Wall -Wextra -Werror  \
 ROOT_IMPL_SRC = $(if $(filter apatch,$(ROOT_IMPL)),src/root_impl/apatch.c,src/root_impl/kernelsu.c)
 
 SRCS = src/root_impl/common.c $(ROOT_IMPL_SRC) \
-	   src/companion.c src/main.c src/utils.c src/zygiskd.c src/zn_companion.c \
-	   src/zn_status.c
+	   src/companion.c src/main.c src/utils.c src/zygiskd.c
 
 OBJS = $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(SRCS))
 BIN = $(OBJ_DIR)/zygiskd
 
-# INFO: The Zygisk Next module contract lives with the loader, the daemon hosts
-#       the companion side of it and must follow the very same layout.
 INCLUDES = -Isrc -Isrc/root_impl -I../loader/src/include
 
 .PHONY: all arch clean
@@ -62,12 +56,11 @@ arch: $(BIN)
 
 clean:
 	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/zygiskd
-	rm -rf $(BUILD_DIR)/obj/$(BUILD_TYPE)/vexcore-target
 
 $(OBJ_DIR)/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC_ARCH) $(ZYGISKD_CFLAGS) $(TYPE_CFLAGS) $(INCLUDES) -c $< -o $@
 
-$(BIN): $(OBJS) $(VEXCORE_LIB)
+$(BIN): $(OBJS)
 	@mkdir -p $(dir $@)
-	$(CC_ARCH) $(TYPE_LDFLAGS) $(OBJS) $(VEXCORE_LIB) -llog -o $@
+	$(CC_ARCH) $(TYPE_LDFLAGS) $(OBJS) -llog -o $@

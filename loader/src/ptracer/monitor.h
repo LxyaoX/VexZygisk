@@ -10,14 +10,9 @@
    it. There is one monitor binary and it is the 64-bit one. */
 #define MONITOR_ABI "64"
 
-/* One module as the daemon reported it: the fields only mean anything next to
-   each other, so they travel as a record. */
+/* One module as the daemon reported it. */
 struct daemon_module {
   char *name;
-  bool is_zn;
-  bool companion;
-  char **targets;
-  uint32_t targets_len;
 };
 
 /* Where the monitor is in its own life; the card words each one differently. */
@@ -42,7 +37,6 @@ struct monitor_status_view {
 
   const struct daemon_module *modules;
   uint32_t modules_len;
-  uint32_t zn_len;
 
   bool supported;
   bool zygote_injected;

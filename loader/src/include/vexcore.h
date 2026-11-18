@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 /* The Rust half of the loader, as C sees it
-   (rust/vexcore/src/{hash,lookup,zn,got}.rs).
+   (rust/vexcore/src/{hash,lookup,got}.rs).
 
    Only values cross this line, never state: a name in, an address out, plus the
    tables the answer is searched in. Nothing on the far side allocates, owns a
@@ -65,14 +65,5 @@ uintptr_t vexcore_elf_lookup(const struct vexcore_symbol *dynsym, size_t dynsym_
    answers. */
 bool vexcore_got_offset(const char *path, const char *symbol,
                         uint64_t *out_bias, uint64_t *out_got_off);
-
-/* One line of a module's zn_modules.txt, split into the caller's buffers, each
-   NUL-terminated. False means the line is not one this daemon can act on:
-   unreadable, or too long for the buffer, which for a path is a refusal rather
-   than a truncation. Nothing is allocated. */
-bool vexcore_zn_parse_line(const char *line, const char *module_dir,
-                           bool *out_is_name, bool *out_companion,
-                           char *out_target, size_t out_target_cap,
-                           char *out_lib, size_t out_lib_cap);
 
 #endif /* VEXCORE_H */

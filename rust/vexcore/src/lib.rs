@@ -28,13 +28,11 @@ mod got;
 mod hash;
 mod lookup;
 mod slice_ext;
-mod zn;
 
 #[cfg(not(test))]
 pub use got::vexcore_got_offset;
 pub use hash::{vexcore_elf_hash, vexcore_gnu_hash};
 pub use lookup::{vexcore_elf_lookup, vexcore_gnu_lookup, Elf64Sym};
-pub use zn::vexcore_zn_parse_line;
 
 /// There is no unwinding in an injected process: a panic that unwound would
 /// have to run destructors across frames the C side is holding state in, and

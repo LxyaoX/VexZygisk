@@ -49,16 +49,16 @@ endif
 BUILD_DIR ?= $(ROOT_DIR)/build
 
 # INFO: The Rust half of VexZygisk (rust/vexcore): the ELF symbol lookups and
-#       the Zn module line parser. Built by cargo rather than by the compiler
-#       these Makefiles drive, because cargo is what knows how to produce a
-#       `no_std` staticlib for an Android target - and it is the same command a
-#       developer runs by hand, so there is one way to build it and one place it
-#       can be configured.
+#       the GOT walker. Built by cargo rather than by the compiler these
+#       Makefiles drive, because cargo is what knows how to produce a `no_std`
+#       staticlib for an Android target - and it is the same command a developer
+#       runs by hand, so there is one way to build it and one place it can be
+#       configured.
 #
-#       It is defined here rather than in either component's Makefile because
-#       both link it: the loader and the tracer read ELF files the same way, and
-#       the daemon parses the same module lines the loader's modules ship. One
-#       archive, built once per build type, under this build's object directory.
+#       It is defined here rather than in the loader's Makefile because every
+#       build includes common.mk; the loader is the one that links the archive.
+#       One archive, built once per build type, under this build's object
+#       directory.
 #
 #       The linker variable is named for cargo's benefit even though a staticlib
 #       is assembled and never linked: a dependency that grows a link step later
