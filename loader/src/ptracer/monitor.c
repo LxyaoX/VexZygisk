@@ -92,6 +92,41 @@ static struct rezygiskd_status status = {
 static int monitor_epoll_fd;
 static bool monitor_events_running = true;
 
+typedef void (*monitor_event_callback_t)(void);
+
+bool monitor_events_init() {
+  /* INFO: Close-on-exec, like every other descriptor this process opens. The
+            events are set up before the daemon and the tracer are forked, and
+            without the flag the poll fd would be inherited by both of them. */
+  monitor_epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+  if (monitor_epoll_fd == -1) {
+    PLOGE("epoll_create1");
+
+    return false;
+  }
+
+  return true;
+}
+
+bool monitor_events_register_event(monitor_event_callback_t event_cb, int fd, uint32_t events) {
+  struct epoll_event ev = {
+    .data.ptr = (void *)event_cb,
+    .events = events
+  };
+
+  if (epoll_ctl(monitor_epoll_fd, EPOLL_CTL_ADD, fd, &ev) == -1) {
+    PLOGE("epoll_ctl");
+
+    return false;
+  }
+
+  return true;
+}
+
+void monitor_events_stop() {
+  monitor_events_running = false;
+}
+
 void monitor_events_loop() {
   struct epoll_event events[2];
   while (monitor_events_running) {
