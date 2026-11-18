@@ -221,18 +221,18 @@ static bool dlopen_inject(int pid, struct user_regs_struct *regs, struct maps_in
 
   LOGI("injected library base %p size %zu", (void *)base, size);
 
-  /* INFO: Three arguments and not two. The handle comes first so the injector
-            can close this library at its own teardown, which is what leaves the
-            process with no mapping of ours in it at all - a replaced name is
-            still a mapping, and a mapping is what a scan reads. It is the same
-            value dlsym above was called with. */
-  long entry_args[3] = {
-    (long)handle,
+  /* INFO: Two arguments: the address and size of the injected block. The dlopen
+            handle is deliberately not passed down. The teardown used to receive
+            it and dlclose the library, which freed its soinfo while the linker
+            list still walked it in load order - the mismatch a detector finds
+            by deriving addresses from the allocator's page chain. The injector
+            hides the mapping name in place instead and keeps the soinfo linked. */
+  long entry_args[2] = {
     (long)base,
     (long)size
   };
 
-  remote_call(pid, regs, entry, (uintptr_t)return_addr, entry_args, 3);
+  remote_call(pid, regs, entry, (uintptr_t)return_addr, entry_args, 2);
 
   return (uintptr_t)regs->REG_IP == (uintptr_t)return_addr;
 }

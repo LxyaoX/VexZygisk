@@ -35,21 +35,6 @@
 
 void *start_addr = NULL;
 size_t block_size = 0;
-void *injector_handle = NULL;
-
-/* dlclose, reached through the exact type of the hook that calls it.
-
-   The teardown must leave this library with a jump and not a call: a call's
-   return would land in a library that is gone by then. clang allows musttail
-   only between functions whose signatures agree - same parameter count, same
-   types - and the hook takes the (void *, size_t) of the function it replaces
-   while dlclose takes one parameter. So the call goes through this; on AArch64
-   the extra argument is a register dlclose never reads, and the cast buys the
-   jump. */
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wcast-function-type-mismatch"
-static int (*const injector_close)(void *handle, size_t unused) = (int (*)(void *, size_t))dlclose;
-#pragma clang diagnostic pop
 
 /* INFO: Flag indices */
 enum {
@@ -366,10 +351,12 @@ static void unhook_functions(void);
    the hooks come off and the mappings stop naming anything before there is an
    application around to look.
 
-   The library is closed rather than unmapped. Unmapping the block by hand left
-   the linker holding a module entry for memory that was gone, and a detector
-   walking that list read a header unmapped under it and took the application
-   down. Closing the handle removes the entry and the mapping together. */
+   The library keeps its linker entry and its mapping; only the name in the
+   mapping is replaced. Closing the handle used to free its soinfo in the
+   middle of the linker's list - a block later reused by another dlopen while
+   the list still walked in load order - which is exactly the inconsistency a
+   detector cross-checks against the allocator's page chain. A same-address
+   copy leaves every pointer in the still-linked soinfo valid. */
 DCL_HOOK_FUNC(int, pthread_attr_setstacksize, void *target, size_t size) {
   int res = old_pthread_attr_setstacksize((pthread_attr_t *)target, size);
   LOGV("Call pthread_attr_setstacksize in [tid, pid]: %d, %d", gettid(), getpid());
@@ -421,31 +408,16 @@ DCL_HOOK_FUNC(int, pthread_attr_setstacksize, void *target, size_t size) {
       LOGW("Failed to hide the module mappings");
     }
 
-    /* And then the library itself goes: a name that has been replaced is still a
-       mapping, and a mapping is what a scan reads.
-
-       Closing the handle is a consequence of the injection: the target's own
-       linker loaded this library (ptracer.c), so it sits in that linker's module
-       list, and unmapping the block under the entry is what used to take an
-       application down. dlclose removes entry and mapping in one step.
-
-       It runs after the pass above so a linker that declines to unload - bionic
-       returns without unloading when the library handed out a TLS block - leaves
-       the process hidden rather than gone, which is the floor.
-
-       musttail, for the reason the reference needs it for its own unmap: the
-       return would otherwise be an instruction in a library dlclose has already
-       taken away. The call goes through injector_close because a musttail cannot
-       change arity. */
-    if (injector_handle == NULL) {
-      LOGD("kept libzygisk.so mapped at %p with size %zu (no handle to close)", start_addr, block_size);
-
-      return res;
-    }
-
-    LOGD("closing libzygisk.so at %p with size %zu", start_addr, block_size);
-
-    [[clang::musttail]] return injector_close(injector_handle, 0);
+    /* The injector itself stays: its name was replaced with a same-address
+       copy in the pass above, which is what removes the string a scan reads.
+       Closing the handle here would instead free its soinfo out from under the
+       linker list - the block can then be handed to a different library loaded
+       later, while this list still walks every entry in load order. That is the
+       exact mismatch a detector reports by deriving expected soinfo addresses
+       from the allocator's page chain. Keeping the list whole is the fix; the
+       name is already gone. */
+    LOGD("kept libzygisk.so at %p with size %zu; its map name was replaced, its soinfo stays linked",
+         start_addr, block_size);
   }
 
   return res;
